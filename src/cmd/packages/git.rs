@@ -354,7 +354,7 @@ fn update_one(
         .candidate_path(&clone, &package.name)
         .map_err(&candidate)?;
     super::validate_shape(&candidate_path).map_err(&candidate)?;
-    let review = TrustReview::scan(&candidate_path).map_err(&candidate)?;
+    let review = TrustReview::scan(&project.root, &candidate_path).map_err(&candidate)?;
     // Computed before the question, so the tree the operator was shown is the tree that is
     // installed if they say yes.
     let reviewed_identity = stamp::content_identity(&candidate_path).map_err(&candidate)?;

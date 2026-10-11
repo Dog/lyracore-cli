@@ -30,27 +30,39 @@ use super::{
 use crate::{Error, Result};
 use std::path::Path;
 
-/// The catalog of notify-hook events, as `module/build.rs` knows it. A `game_hook!` naming anything
-/// else fails the server build; the review reports it as unknown rather than silently counting it.
-const HOOK_EVENTS: [&str; 17] = [
-    "on_damage_taken",
-    "on_creature_spawn",
-    "on_levelup",
-    "on_group_invite",
-    "on_death",
-    "on_kill",
-    "on_aggro",
-    "on_cast_resolved",
-    "on_loot",
-    "on_quest_accept",
-    "on_quest_turnin",
-    "on_login",
-    "on_logout",
-    "on_gossip_select",
-    "on_creature_death",
-    "on_hp_threshold",
-    "on_go_used",
-];
+const HOOK_CATALOGUE: &str = "datascripts/runtime-scripts/events.json";
+
+// Match the required row types in Module build.rs. Unknown fields remain compatible.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // Deserialization checks fields the event lookup does not use.
+struct HookEvent {
+    event: String,
+    payload_type: String,
+    actor: String,
+    target: String,
+    fields: Vec<HookField>,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)] // Deserialization checks the Module's field contract.
+struct HookField {
+    name: String,
+    #[serde(rename = "type")]
+    field_type: HookFieldType,
+    source: String,
+}
+
+#[derive(serde::Deserialize)]
+enum HookFieldType {
+    PlayerEntity,
+    #[serde(rename = "number")]
+    Number,
+    #[serde(rename = "boolean")]
+    Boolean,
+    #[serde(rename = "string")]
+    Text,
+}
 
 /// What a candidate Package would register, and how much unclassified Rust comes with it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -82,8 +94,9 @@ pub struct TrustReview {
 }
 
 impl TrustReview {
-    /// Scan `package_dir`. Reads; never writes, never runs anything.
-    pub fn scan(package_dir: &Path) -> Result<Self> {
+    /// Scan a Package against the destination checkout. An unreadable or malformed hook
+    /// catalogue makes a review with hooks unverifiable. Reads only, never runs code.
+    pub fn scan(checkout_root: &Path, package_dir: &Path) -> Result<Self> {
         let mut review = Self::default();
         let entries = tree::collect(package_dir)?;
 
@@ -105,6 +118,27 @@ impl TrustReview {
             })?;
             review.rust_lines += raw.lines().count();
             review.scan_source(&strip_comments_and_strings(&raw));
+        }
+
+        if !review.hooks.is_empty() {
+            let catalogue = checkout_root.join(HOOK_CATALOGUE);
+            let source = std::fs::read_to_string(&catalogue).map_err(|error| {
+                Error::Usage(format!(
+                    "trust review is unverifiable: cannot read hook catalogue {}: {error}",
+                    catalogue.display()
+                ))
+            })?;
+            let events: Vec<HookEvent> = serde_json::from_str(&source).map_err(|error| {
+                Error::Usage(format!(
+                    "trust review is unverifiable: cannot parse hook catalogue {}: {error}",
+                    catalogue.display()
+                ))
+            })?;
+            for (event, _) in &mut review.hooks {
+                if !events.iter().any(|row| row.event == *event) {
+                    *event = format!("{event} (unknown event, the Module build refuses it)");
+                }
+            }
         }
 
         review.addons = entries
@@ -188,11 +222,6 @@ impl TrustReview {
         }
         for head in marker_heads(content, "game_hook!") {
             if let Some((event, name)) = match_hook(head) {
-                let event = if HOOK_EVENTS.contains(&event.as_str()) {
-                    event
-                } else {
-                    format!("{event} (unknown event — the server build refuses it)")
-                };
                 self.hooks.push((event, name));
             }
         }
@@ -632,12 +661,28 @@ mod tests {
 
     fn package(files: &[(&str, &str)]) -> TempDir {
         let tmp = TempDir::new().unwrap();
+        write_catalogue(tmp.path(), &["on_login", "on_kill"]);
         for (relative, content) in files {
             let path = tmp.path().join(relative);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, content).unwrap();
         }
         tmp
+    }
+
+    fn write_catalogue(root: &Path, events: &[&str]) {
+        let path = root.join(HOOK_CATALOGUE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let rows: Vec<_> = events
+            .iter()
+            .map(|event| {
+                serde_json::json!({
+                    "event": event, "payloadType": "crate::hooks::Payload",
+                    "actor": "0", "target": "0", "fields": []
+                })
+            })
+            .collect();
+        std::fs::write(path, serde_json::to_vec(&rows).unwrap()).unwrap();
     }
 
     fn spell_delta(package: &str) -> String {
@@ -671,7 +716,7 @@ mod tests {
              character_owned!(delete, fn sweep_delete_pkg_greeter_log(ctx, guid) { });\n",
         )]);
 
-        let review = TrustReview::scan(tmp.path()).unwrap();
+        let review = TrustReview::scan(tmp.path(), tmp.path()).unwrap();
 
         assert_eq!(review.tables, ["pkg_greeter_log"]);
         assert_eq!(review.reducers, ["pkg_greeter_reset"]);
@@ -705,7 +750,7 @@ mod tests {
              pub struct Legacy { pub id: u64 }\n",
         )]);
 
-        let review = TrustReview::scan(tmp.path()).unwrap();
+        let review = TrustReview::scan(tmp.path(), tmp.path()).unwrap();
 
         assert_eq!(
             review.tables,
@@ -731,7 +776,7 @@ mod tests {
              game_hook!(on_login, fn real(ctx, payload) { });\n",
         )]);
 
-        let review = TrustReview::scan(tmp.path()).unwrap();
+        let review = TrustReview::scan(tmp.path(), tmp.path()).unwrap();
 
         assert_eq!(review.hooks, [("on_login".to_string(), "real".to_string())]);
         assert!(review.tick_passes.is_empty(), "{review:?}");
@@ -744,7 +789,7 @@ mod tests {
         std::fs::create_dir(tmp.path().join("src")).unwrap();
         std::fs::write(tmp.path().join("src/mod.rs"), [0xff, 0xfe]).unwrap();
 
-        let error = TrustReview::scan(tmp.path()).unwrap_err();
+        let error = TrustReview::scan(tmp.path(), tmp.path()).unwrap_err();
 
         assert!(
             error.to_string().contains("cannot read Rust source"),
@@ -759,10 +804,109 @@ mod tests {
             "game_hook!(on_teatime, fn brew(ctx, payload) { });\n",
         )]);
 
-        let review = TrustReview::scan(tmp.path()).unwrap();
+        let review = TrustReview::scan(tmp.path(), tmp.path()).unwrap();
 
         assert_eq!(review.hooks.len(), 1);
         assert!(review.hooks[0].0.contains("unknown event"), "{review:?}");
+    }
+
+    #[test]
+    fn hook_events_follow_the_destination_checkout_catalogue() {
+        let checkout = TempDir::new().unwrap();
+        let events = [
+            "on_death_prevented",
+            "on_cast_finished",
+            "on_character_relocated",
+            "on_checkout_specific_event",
+        ];
+        write_catalogue(checkout.path(), &events);
+        let candidate = package(&[(
+            "src/mod.rs",
+            "game_hook!(on_death_prevented, fn prevent(ctx, p) {});\n\
+             game_hook!(on_cast_finished, fn finish(ctx, p) {});\n\
+             game_hook!(on_character_relocated, fn relocate(ctx, p) {});\n\
+             game_hook!(on_checkout_specific_event, fn custom(ctx, p) {});\n\
+             game_hook!(on_login, fn login(ctx, p) {});\n",
+        )]);
+
+        let review = TrustReview::scan(checkout.path(), candidate.path()).unwrap();
+
+        for event in events {
+            assert!(
+                review.hooks.iter().any(|(found, _)| found == event),
+                "{review:?}"
+            );
+        }
+        assert!(review
+            .render(candidate.path())
+            .contains("on_login (unknown event, the Module build refuses it) -> login"));
+    }
+
+    #[test]
+    fn a_missing_hook_catalogue_makes_the_review_unverifiable() {
+        let checkout = TempDir::new().unwrap();
+        let candidate = package(&[("src/mod.rs", "game_hook!(on_login, fn login(ctx, p) {});")]);
+
+        let error = TrustReview::scan(checkout.path(), candidate.path()).unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("trust review is unverifiable"),
+            "{message}"
+        );
+        assert!(message.contains("cannot read hook catalogue"), "{message}");
+        assert!(
+            message.contains(&checkout.path().join(HOOK_CATALOGUE).display().to_string()),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn malformed_hook_catalogues_make_the_review_unverifiable() {
+        let candidate = package(&[("src/mod.rs", "game_hook!(on_login, fn login(ctx, p) {});")]);
+        for invalid in [
+            "not json",
+            "{}",
+            "[{}]",
+            r#"[{"event":17}]"#,
+            r#"[{"event":"on_login"}]"#,
+            r#"[{"event":"on_login","payloadType":"P","actor":"0","target":"0","fields":[{"name":"x","type":"unknown","source":"0"}]}]"#,
+        ] {
+            std::fs::write(candidate.path().join(HOOK_CATALOGUE), invalid).unwrap();
+
+            let error = TrustReview::scan(candidate.path(), candidate.path()).unwrap_err();
+
+            let message = error.to_string();
+            assert!(
+                message.contains("trust review is unverifiable"),
+                "{invalid}: {message}"
+            );
+            assert!(message.contains("cannot parse hook catalogue"), "{message}");
+            assert!(message.contains(HOOK_CATALOGUE), "{message}");
+        }
+    }
+
+    #[test]
+    fn non_utf8_hook_catalogues_make_the_review_unverifiable() {
+        let candidate = package(&[("src/mod.rs", "game_hook!(on_login, fn login(ctx, p) {});")]);
+        std::fs::write(candidate.path().join(HOOK_CATALOGUE), [0xff]).unwrap();
+
+        let error = TrustReview::scan(candidate.path(), candidate.path()).unwrap_err();
+
+        assert!(
+            error.to_string().contains("trust review is unverifiable"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn packages_without_hooks_do_not_need_a_hook_catalogue() {
+        let checkout = TempDir::new().unwrap();
+        let candidate = package(&[("src/mod.rs", "game_tick_pass!(fn tick(ctx) {});")]);
+
+        let review = TrustReview::scan(checkout.path(), candidate.path()).unwrap();
+
+        assert_eq!(review.tick_passes, ["tick"]);
     }
 
     #[test]
@@ -777,7 +921,7 @@ mod tests {
             ),
         ]);
 
-        let review = TrustReview::scan(tmp.path()).unwrap();
+        let review = TrustReview::scan(tmp.path(), tmp.path()).unwrap();
 
         // Addons are DIRECTORIES; overrides are individual files that shadow stock ones.
         assert_eq!(review.addons, ["Bagger", "Greeter"]);
@@ -788,7 +932,7 @@ mod tests {
     #[test]
     fn the_rendered_review_states_that_unclassified_rust_is_trusted_code() {
         let tmp = package(&[("src/mod.rs", "pub fn helper() {}\n")]);
-        let review = TrustReview::scan(tmp.path()).unwrap();
+        let review = TrustReview::scan(tmp.path(), tmp.path()).unwrap();
 
         let text = review.render(tmp.path());
 
@@ -810,7 +954,7 @@ mod tests {
             ("scripts/README.md", "not a script\n"),
         ]);
 
-        let review = TrustReview::scan(tmp.path()).unwrap();
+        let review = TrustReview::scan(tmp.path(), tmp.path()).unwrap();
 
         assert_eq!(review.runtime_scripts, ["bonus.lua", "ember_echo.ts"]);
         assert!(!review.registers_nothing(), "{review:?}");
@@ -828,7 +972,7 @@ mod tests {
             ("datascripts/welcome.ts", "// a Datascript\n"),
             ("datascripts/README.md", "not a script\n"),
         ]);
-        let review = TrustReview::scan(tmp.path()).unwrap();
+        let review = TrustReview::scan(tmp.path(), tmp.path()).unwrap();
         assert_eq!(review.datascripts, ["datascripts/welcome.ts"]);
         assert!(!review.registers_nothing());
         assert!(review.kinds_summary().contains("1 datascripts"));
@@ -842,7 +986,7 @@ mod tests {
             &two_script_artifact("example.prebuilt"),
         )]);
 
-        let review = TrustReview::scan(tmp.path()).unwrap();
+        let review = TrustReview::scan(tmp.path(), tmp.path()).unwrap();
 
         assert_eq!(review.runtime_scripts, ["example.goodbye", "example.greet"]);
         assert!(!review.registers_nothing(), "{review:?}");
@@ -871,7 +1015,7 @@ mod tests {
         std::fs::create_dir_all(&sibling).unwrap();
         std::fs::write(sibling.join("broken.json"), r#"{"version":9}"#).unwrap();
 
-        let review = TrustReview::scan(&candidate).unwrap();
+        let review = TrustReview::scan(tmp.path(), &candidate).unwrap();
 
         assert_eq!(review.package_delta_count, 1);
         assert_eq!(review.package_deltas, [("spell".to_string(), 1)]);
@@ -892,7 +1036,7 @@ mod tests {
             &mixed_family_delta("example.mixed"),
         )]);
 
-        let review = TrustReview::scan(tmp.path()).unwrap();
+        let review = TrustReview::scan(tmp.path(), tmp.path()).unwrap();
 
         let text = review.render(tmp.path());
 
@@ -913,7 +1057,7 @@ mod tests {
     fn a_malformed_generated_artifact_is_refused_by_the_package_delta_reader() {
         let tmp = package(&[("data/.generated/broken.json", r#"{"version":9}"#)]);
 
-        let error = TrustReview::scan(tmp.path()).unwrap_err();
+        let error = TrustReview::scan(tmp.path(), tmp.path()).unwrap_err();
 
         assert!(error.to_string().contains("broken.json"), "{error}");
     }
@@ -926,7 +1070,7 @@ mod tests {
         std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
         std::fs::write(&artifact, [0xff]).unwrap();
 
-        let error = TrustReview::scan(&candidate).unwrap_err();
+        let error = TrustReview::scan(tmp.path(), &candidate).unwrap_err();
 
         assert!(error.to_string().contains("non-utf8.json"), "{error}");
         assert!(error.to_string().contains("UTF-8"), "{error}");
@@ -940,8 +1084,8 @@ mod tests {
             ("src/b.rs", "game_hook!(on_kill, fn two(ctx, p) { });\n"),
         ]);
 
-        let first = TrustReview::scan(tmp.path()).unwrap();
-        let second = TrustReview::scan(tmp.path()).unwrap();
+        let first = TrustReview::scan(tmp.path(), tmp.path()).unwrap();
+        let second = TrustReview::scan(tmp.path(), tmp.path()).unwrap();
 
         assert_eq!(first, second);
         assert_eq!(
