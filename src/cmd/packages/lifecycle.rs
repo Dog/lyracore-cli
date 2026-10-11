@@ -91,7 +91,7 @@ pub fn disable(project: &ProjectLayout, realm: &Realm, name: &str, yes: bool) ->
         )));
     }
 
-    let review = TrustReview::scan(&package.dir)?;
+    let review = TrustReview::scan(&project.root, &package.dir)?;
     let state = RuntimeState::load(&project.state_file())?;
     if state.record(Component::Spacetime).is_some() {
         let shards = super::recorded_databases(project)?;
@@ -201,7 +201,7 @@ pub fn remove(project: &ProjectLayout, prompt: &dyn Prompt, name: &str, yes: boo
     print!("{}", super::provenance_report(package.stamp.as_ref()));
     println!(
         "  content   {}",
-        TrustReview::scan(&package.dir)?.kinds_summary()
+        TrustReview::scan(&project.root, &package.dir)?.kinds_summary()
     );
     println!();
     print!("{}", recovery_note(&package.name, package.stamp.as_ref()));
@@ -658,7 +658,8 @@ pub(crate) mod tests {
         let tmp = TempDir::new().unwrap();
         let project = checkout(&tmp);
         installed(&tmp, &project, "greeter");
-        let review = TrustReview::scan(&project.packages_dir().join("greeter")).unwrap();
+        let review =
+            TrustReview::scan(&project.root, &project.packages_dir().join("greeter")).unwrap();
         assert_eq!(review.tables, ["pkg_greeter_log"], "fixture check");
 
         let warning = table_warning(&PackageName::parse("greeter").unwrap(), &review.tables);

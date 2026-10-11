@@ -489,7 +489,7 @@ pub(crate) fn install(
     let reviewed_identity = stamp::content_identity(source)?;
     validate_shape(source)?;
 
-    let review = TrustReview::scan(source)?;
+    let review = TrustReview::scan(&project.root, source)?;
     println!();
     print!("{}", review.render(source));
     // The review header names the tree it scanned, which for a clone is a scratch directory the
@@ -822,7 +822,7 @@ pub fn new(
     )?;
     println!(
         "{}",
-        review::TrustReview::scan(staged.path())?.render(&reference)
+        review::TrustReview::scan(&project.root, staged.path())?.render(&reference)
     );
 
     let identity = stamp::content_identity(staged.path())?;
@@ -1027,7 +1027,7 @@ pub fn list(project: &ProjectLayout) -> Result<()> {
         }
         println!(
             "  content   {}",
-            TrustReview::scan(&package.dir)?.kinds_summary()
+            TrustReview::scan(&project.root, &package.dir)?.kinds_summary()
         );
     }
     Ok(())
@@ -1142,6 +1142,12 @@ pub(super) mod tests {
             "# Package API, version 1\n",
         )
         .unwrap();
+        let catalogue = root.join("datascripts/runtime-scripts/events.json");
+        std::fs::create_dir_all(catalogue.parent().unwrap()).unwrap();
+        std::fs::write(
+            catalogue,
+            r#"[{"event":"on_login","payloadType":"crate::hooks::LoginPayload","actor":"payload.guid","target":"0","fields":[]}]"#,
+        ).unwrap();
         ProjectLayout::from_root(&root).unwrap()
     }
 
@@ -1320,6 +1326,33 @@ pub(super) mod tests {
             assert!(!call.contains("spacetime publish"), "{call}");
             assert!(!call.contains("--pack-client"), "{call}");
         }
+    }
+
+    #[test]
+    fn an_unverifiable_hook_review_stops_installation_before_consent() {
+        let tmp = TempDir::new().unwrap();
+        let project = checkout(&tmp);
+        let source = candidate(&tmp, "greeter");
+        std::fs::remove_file(project.root.join("datascripts/runtime-scripts/events.json")).unwrap();
+        let prompt = RecordingAnswer {
+            asked: Cell::new(false),
+        };
+
+        let error = add(
+            &project,
+            &FakeStack::new().runner(),
+            &prompt,
+            source.to_str().unwrap(),
+            false,
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("trust review is unverifiable"),
+            "{error}"
+        );
+        assert!(!prompt.asked.get());
+        assert!(!project.packages_dir().join("greeter").exists());
     }
 
     #[test]
