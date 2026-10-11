@@ -51,16 +51,17 @@ fn run(args: &[String]) -> Result<i32> {
         }
         Command::Bindings { check } => {
             let project = ProjectLayout::discover()?;
-            let prepared = if check {
-                cmd::bindings::check(&project)?
+            if check {
+                let prepared = cmd::bindings::check(&project)?;
+                println!(
+                    "{}",
+                    serde_json::to_string(&prepared)
+                        .map_err(|e| lyracore_cli::Error::Process(e.to_string()))?
+                );
             } else {
-                cmd::bindings::ensure(&project, &runner)?
-            };
-            println!(
-                "{}",
-                serde_json::to_string(&prepared)
-                    .map_err(|e| lyracore_cli::Error::Process(e.to_string()))?
-            );
+                cmd::bindings::ensure(&project, &runner)?;
+                println!("Gateway bindings are ready.");
+            }
             Ok(EXIT_OK)
         }
         Command::Preflight => {
