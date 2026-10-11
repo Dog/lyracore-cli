@@ -46,6 +46,7 @@ repeat. Commands run against the selected Core checkout.
 ```text
 lyracore help [--all]
 lyracore doctor
+lyracore bindings [--check]
 lyracore preflight
 lyracore publish [DATABASE ...] [--skip-preflight]
 lyracore dev up [--single] [--lan <IP>]
@@ -250,6 +251,25 @@ processes the CLI started, `logs/` holds their output, and `config.json` holds t
 When the CLI mints a local coordinator identity, `coordinator-token` stores its credential with
 mode `0600`.
 
+## `bindings`
+
+Run `./lyracore bindings` before a Gateway Cargo build or editor check on a fresh Core checkout.
+It generates private Rust bindings from the local Module with `debug_reducers`, using the pinned
+Rust and SpacetimeDB tools. Schema generation and CLI publishing take Rust flags from the
+checkout's Cargo configuration and ignore ambient Rust-flag overrides. It does not contact a Realm. `dev up` prepares them before its Gateway
+build, and the publish upgrade check reads the prepared schema.
+
+Files live under `.lyracore/generated/gateway/`, outside the source tree. Repeated preparation
+reuses output while source and generated-file hashes match. Module and workspace sources, installed
+Package sources, the Runtime Script event catalogue, Cargo configuration and lockfile, and tool
+pins determine freshness. A failed generation leaves the previous complete output in place.
+
+`./lyracore bindings --check` checks existing output without running Cargo or SpacetimeDB and
+prints JSON with `directory` and `watches`. Core's Gateway build script uses that contract through
+the installed pinned CLI. Missing or stale bindings stop the build with preparation instructions.
+Deleting `.lyracore/generated/gateway/` clears the generated cache, including old directories kept
+for compilers that were already running.
+
 ## `preflight` — the offline deploy gate
 
 ```bash
@@ -313,8 +333,8 @@ Explicit database **NAMES** are published exactly as given:
 * `-c` / `--delete-data` — the destructive wipe — is **refused**, as is any other flag-shaped
   argument, with exit 2 and before a single `spacetime` process starts. Nothing is forwarded.
 
-`--skip-preflight` is the only recognised flag, and it says on stdout that nothing validated the
-schema. Publishing several databases in one command is what makes "every shard" checkable instead of
+`--skip-preflight` skips the preflight checks. Binding preparation and Loot Roll upgrade checks
+still run. Publishing several databases in one command is what makes "every shard" checkable instead of
 remembered: a schema change needs all of them, and the gateway reports a shard left behind only as
 "realm-core unreachable — LOGONS WILL BE REFUSED".
 

@@ -222,7 +222,7 @@ fn check_deploy_build(
 pub fn deploy_check_command(project: &ProjectLayout) -> CommandSpec {
     // `--manifest-path` rather than a bare `-p`: `lyracore` runs from any subdirectory of a
     // checkout, and cargo would otherwise resolve the workspace from the caller's cwd.
-    CommandSpec::new("cargo")
+    module_command(project, "cargo")
         .arg("check")
         .arg("-q")
         .arg("--manifest-path")
@@ -249,6 +249,17 @@ pub fn schema_command(project: &ProjectLayout, out_dir: &Path) -> CommandSpec {
     schema_command_for_language(project, out_dir, "rust")
 }
 
+/// Schema extraction and publishing use the checkout's Cargo configuration. Ambient Rust flags
+/// must not select a different schema while the prepared bindings still match the source hashes.
+pub(crate) fn module_command(project: &ProjectLayout, program: &str) -> CommandSpec {
+    CommandSpec::new(program)
+        .cwd(&project.root)
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("CARGO_BUILD_RUSTFLAGS")
+        .env_remove("CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS")
+}
+
 /// Build the one schema-extraction command shared by preflight and Package Datascript builds.
 ///
 /// The language and destination differ, but the module path, deploy feature set and
@@ -258,7 +269,7 @@ pub(crate) fn schema_command_for_language(
     out_dir: &Path,
     language: &str,
 ) -> CommandSpec {
-    CommandSpec::new("spacetime")
+    module_command(project, "spacetime")
         .arg("generate")
         .arg("--lang")
         .arg(language)

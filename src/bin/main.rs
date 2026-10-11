@@ -49,6 +49,20 @@ fn run(args: &[String]) -> Result<i32> {
             let blocking = cmd::doctor::report(&checks);
             Ok(if blocking { EXIT_FAILURE } else { EXIT_OK })
         }
+        Command::Bindings { check } => {
+            let project = ProjectLayout::discover()?;
+            let prepared = if check {
+                cmd::bindings::check(&project)?
+            } else {
+                cmd::bindings::ensure(&project, &runner)?
+            };
+            println!(
+                "{}",
+                serde_json::to_string(&prepared)
+                    .map_err(|e| lyracore_cli::Error::Process(e.to_string()))?
+            );
+            Ok(EXIT_OK)
+        }
         Command::Preflight => {
             cmd::preflight::run(&ProjectLayout::discover()?, &runner).map(|_| EXIT_OK)
         }
