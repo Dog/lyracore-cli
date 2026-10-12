@@ -56,12 +56,6 @@ fn collect(
         ancestors.push(resolved);
         for entry in fs::read_dir(path)? {
             let entry = entry?;
-            if matches!(
-                entry.file_name().to_str(),
-                Some("target" | ".git" | "node_modules")
-            ) {
-                continue;
-            }
             collect(&entry.path(), files, ancestors)?;
         }
         ancestors.pop();
@@ -292,6 +286,25 @@ mod tests {
         ensure(&project, &stack.runner()).unwrap();
         fs::remove_file(tmp.path().join("packages/example/src/mod.rs")).unwrap();
         assert!(check(&project).is_err());
+    }
+
+    #[test]
+    fn source_directory_names_do_not_hide_schema_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = fixture(tmp.path());
+        for relative in [
+            "module/src/target/mod.rs",
+            "module/src/node_modules/mod.rs",
+            "module/src/.git/included.rs",
+            "packages/example/src/target/mod.rs",
+        ] {
+            let source = tmp.path().join(relative);
+            fs::create_dir_all(source.parent().unwrap()).unwrap();
+            fs::write(&source, "pub struct Row { pub value: u32 }").unwrap();
+            ensure(&project, &FakeStack::new().runner()).unwrap();
+            fs::write(&source, "pub struct Row { pub value: String }").unwrap();
+            assert!(check(&project).is_err(), "{relative}");
+        }
     }
 
     #[test]
