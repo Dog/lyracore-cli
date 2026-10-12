@@ -38,8 +38,6 @@ const DESTRUCTIVE: [&str; 4] = ["-c", "--clear-database", "--delete-data", "--cl
 const VERB: &str = "publish";
 
 const LOOT_RECEIPT_TABLE: &str = "game_loot_roll_promotion_receipt";
-const LOOT_RECEIPT_BINDING: &str =
-    "gateway/src/stdb/bindings/game_loot_roll_promotion_receipt_table.rs";
 const LOOT_DRAIN_QUERIES: [(&str, &str); 3] = [
     (
         "active or staging Loot Rolls",
@@ -138,7 +136,7 @@ fn database_list(databases: &[String]) -> String {
 /// The ONE correct publish invocation.
 pub fn publish_command(project: &ProjectLayout, database: &str) -> Result<CommandSpec> {
     validate_database(VERB, database)?;
-    Ok(CommandSpec::new("spacetime")
+    Ok(preflight::module_command(project, "spacetime")
         .arg("publish")
         .arg("-s")
         .arg(ProjectLayout::STDB_SERVER)
@@ -162,20 +160,16 @@ fn describe_command(database: &str) -> CommandSpec {
         .arg(database)
 }
 
-fn checkout_has_loot_receipt_binding(project: &ProjectLayout) -> Result<bool> {
-    let binding = project.root.join(LOOT_RECEIPT_BINDING);
-    match std::fs::metadata(&binding) {
-        Ok(metadata) if metadata.is_file() => Ok(true),
-        Ok(_) => Err(Error::Process(format!(
-            "loot-roll upgrade marker is not a file: {}. Nothing was published.",
-            binding.display()
-        ))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(Error::Process(format!(
-            "could not inspect loot-roll upgrade marker {}: {error}. Nothing was published.",
-            binding.display()
-        ))),
+fn checkout_has_loot_receipt(project: &ProjectLayout, runner: &dyn ProcessRunner) -> Result<bool> {
+    let prepared = crate::cmd::bindings::ensure(project, runner)?;
+    let (schema, errors) = crate::rls::generated_schema(&prepared.directory);
+    if !errors.is_empty() {
+        return Err(Error::Process(format!(
+            "could not read the prepared Module schema: {}. Nothing was published.",
+            errors.join("; ")
+        )));
     }
+    Ok(schema.contains_key(LOOT_RECEIPT_TABLE))
 }
 
 fn deployed_has_loot_receipt(database: &str, output: &str) -> Result<bool> {
@@ -247,7 +241,7 @@ pub(crate) fn require_loot_roll_upgrade_ready(
     runner: &dyn ProcessRunner,
     databases: &[String],
 ) -> Result<()> {
-    if !checkout_has_loot_receipt_binding(project)? {
+    if !checkout_has_loot_receipt(project, runner)? {
         return Ok(());
     }
 
@@ -307,8 +301,7 @@ pub fn run(
 
     if skip_preflight {
         println!(
-            "· skipping preflight (--skip-preflight): nothing has validated this module's schema, \
-             #[default] encodings or visibility filters."
+            "· skipping preflight (--skip-preflight): binding preparation and Loot Roll upgrade checks still run."
         );
     } else {
         preflight::run(project, runner)?;
@@ -512,9 +505,11 @@ mod tests {
 
     fn loot_receipt_upgrade(tmp: &TempDir) -> ProjectLayout {
         let project = healthy(tmp);
-        let binding = project.root.join(LOOT_RECEIPT_BINDING);
-        std::fs::create_dir_all(binding.parent().unwrap()).unwrap();
-        std::fs::write(binding, "// generated receipt table binding\n").unwrap();
+        let stack = FakeStack::new().with_generated_binding(
+            "game_loot_roll_promotion_receipt_table.rs",
+            "use super::character_type::Character;\n/// Table handle for the table `game_loot_roll_promotion_receipt`.\nimpl __sdk::Table for ReceiptTableHandle<'_> {\n    type Row = Character;\n}\n",
+        );
+        crate::cmd::bindings::ensure(&project, &stack.runner()).unwrap();
         project
     }
 
@@ -763,8 +758,10 @@ mod tests {
     fn skip_preflight_cannot_skip_the_live_loot_upgrade_check() {
         let tmp = TempDir::new().unwrap();
         let project = loot_receipt_upgrade(&tmp);
-        std::fs::write(project.rust_toolchain_file(), "channel = \"1.0.0\"\n").unwrap();
-        let stack = clean_old_schema_stack().with_stdout("FROM game_loot_roll WHERE", " n\n 1\n");
+
+        let stack = clean_old_schema_stack()
+            .fail_on("cargo check", "preflight must be skipped")
+            .with_stdout("FROM game_loot_roll WHERE", " n\n 1\n");
 
         let error = run(&project, &stack.runner(), &names(&["lyracore"]), true).unwrap_err();
 
@@ -783,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_publishes_without_the_receipt_binding_keep_the_existing_path() {
+    fn ordinary_publishes_without_the_receipt_table_keep_the_existing_path() {
         let tmp = TempDir::new().unwrap();
         let project = healthy(&tmp);
         let stack = FakeStack::new().fail_on("spacetime describe", "must not inspect live state");
@@ -801,16 +798,16 @@ mod tests {
     }
 
     #[test]
-    fn an_invalid_receipt_binding_marker_refuses_before_live_reads_or_publish() {
+    fn failed_schema_preparation_stops_before_live_reads_or_publish() {
         let tmp = TempDir::new().unwrap();
         let project = healthy(&tmp);
-        std::fs::create_dir_all(project.root.join(LOOT_RECEIPT_BINDING)).unwrap();
-        let stack = FakeStack::new();
-
-        let error = run(&project, &stack.runner(), &names(&["lyracore"]), true).unwrap_err();
-
-        assert!(error.to_string().contains("not a file"), "{error}");
-        assert!(stack.rendered().is_empty(), "{:?}", stack.rendered());
+        let stack = FakeStack::new().fail_on("spacetime generate", "bad Module");
+        assert!(run(&project, &stack.runner(), &names(&["lyracore"]), true).is_err());
+        assert!(!stack
+            .rendered()
+            .iter()
+            .any(|command| command.starts_with("spacetime describe")
+                || command.starts_with("spacetime publish")));
     }
 
     // ---- bare `publish` resolves against the recorded topology, not a hardcoded default ----
@@ -988,6 +985,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let project = healthy(&tmp);
         std::fs::write(project.rust_toolchain_file(), "channel = \"1.0.0\"\n").unwrap();
+
         let stack = FakeStack::new();
 
         let error = run(&project, &stack.runner(), &names(&["lyracore"]), false).unwrap_err();
@@ -1068,9 +1066,8 @@ mod tests {
     fn skip_preflight_is_the_only_way_past_the_gate() {
         let tmp = TempDir::new().unwrap();
         let project = healthy(&tmp);
-        // A checkout preflight would reject...
-        std::fs::write(project.rust_toolchain_file(), "channel = \"1.0.0\"\n").unwrap();
-        let stack = FakeStack::new();
+        // A Module build preflight would refuse.
+        let stack = FakeStack::new().fail_on("cargo check", "invalid native build");
         run(&project, &stack.runner(), &names(&["lyracore"]), true).unwrap();
         assert!(
             stack

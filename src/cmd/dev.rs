@@ -317,6 +317,7 @@ impl DevManager {
     }
 
     fn build_gateway(&self, runner: &dyn ProcessRunner) -> Result<()> {
+        crate::cmd::bindings::ensure(&self.project, runner)?;
         println!("· building the gateway...");
         runner.run_and_wait(
             &CommandSpec::new("cargo")

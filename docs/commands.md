@@ -47,6 +47,7 @@ was private, which meant a fresh clone's very first command failed for anyone bu
 
 ```text
 lyracore doctor
+lyracore bindings [--check]
 lyracore preflight
 lyracore publish [DATABASE ...] [--skip-preflight]
 lyracore dev up [--lan <IP>]
@@ -850,6 +851,25 @@ directory. Neither repo carries a zip library, so a machine without the binary g
 the reason, and keeps the directory that was already built. A `<DIR>.zip` this command did not
 write is refused rather than overwritten.
 
+## `bindings`
+
+Run `./lyracore bindings` before a Gateway Cargo build or editor check on a fresh Core checkout.
+It generates private Rust bindings from the local Module with `debug_reducers`, using the pinned
+Rust and SpacetimeDB tools. Schema generation and CLI publishing take Rust flags from the
+checkout's Cargo configuration and ignore ambient Rust-flag overrides. It does not contact a Realm. `dev up` prepares them before its Gateway
+build, and the publish upgrade check reads the prepared schema.
+
+Files live under `.lyracore/generated/gateway/`, outside the source tree. Repeated preparation
+reuses output while source and generated-file hashes match. Module and workspace sources, installed
+Package sources, the Runtime Script event catalogue, Cargo configuration and lockfile, and tool
+pins determine freshness. A failed generation leaves the previous complete output in place.
+
+`./lyracore bindings --check` checks existing output without running Cargo or SpacetimeDB and
+prints JSON with `directory` and `watches`. Core's Gateway build script uses that contract through
+the installed pinned CLI. Missing or stale bindings stop the build with preparation instructions.
+Deleting `.lyracore/generated/gateway/` clears the generated cache, including old directories kept
+for compilers that were already running.
+
 ## `preflight` — the offline deploy gate
 
 ```bash
@@ -895,7 +915,7 @@ Its arguments are database **NAMES**. **Every flag-shaped argument is refused** 
 any process starts — `-c`, `--delete-data`, `--clear-database` and `--clear` with a message naming
 it as the destructive wipe, anything else with the general refusal. Nothing is forwarded to
 `spacetime publish` that this CLI did not put there itself. The only recognised option is
-`--skip-preflight`, which announces on stdout that nothing validated the schema.
+`--skip-preflight`. Binding preparation and Loot Roll upgrade checks still run.
 
 This is the same contract the maintainers' internal deploy script carries — each of those cases is a
 unit test in the CLI too. [`docs/danger-zones.md`](https://github.com/LyraCoreProject/LyraCore/blob/main/docs/danger-zones.md) §1 remains authoritative.

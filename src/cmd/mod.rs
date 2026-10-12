@@ -1,4 +1,5 @@
 pub mod account;
+pub mod bindings;
 pub mod character;
 pub mod client;
 pub mod config;
@@ -43,6 +44,7 @@ lyracore — local LyraCore development
 
 USAGE:
   lyracore doctor                              check whether your machine is ready for `dev up`
+  lyracore bindings [--check]                  prepare Gateway Rust bindings, or check freshness as JSON
   lyracore preflight                           the offline deploy gate: build, schema, filters
   lyracore publish [DATABASE ...]              preflight, then publish the module. With no
                                                names, publishes every database of the active
@@ -205,6 +207,9 @@ prompt. It is never passed as a command-line argument.";
 pub enum Command {
     Doctor,
     Preflight,
+    Bindings {
+        check: bool,
+    },
     Publish {
         /// The database names typed on the command line. Empty means none were — `publish::run`
         /// resolves that against the recorded topology once it has discovered the project.
@@ -308,6 +313,9 @@ impl Command {
             ))),
 
             ["doctor"] => Ok(Command::Doctor),
+            ["bindings"] => Ok(Command::Bindings { check: false }),
+            ["bindings", "--check"] => Ok(Command::Bindings { check: true }),
+            ["bindings", ..] => Err(Error::Usage("usage: lyracore bindings [--check]".into())),
             ["preflight"] => Ok(Command::Preflight),
             ["preflight", other, ..] => Err(Error::Usage(format!(
                 "`preflight` takes no arguments (got '{other}')"
