@@ -837,14 +837,13 @@ impl DevManager {
 
     // ---- logs ----
 
-    pub fn logs(&self, component: Option<Component>) -> Result<()> {
+    pub fn logs(&self, component: Option<Component>, all: bool) -> Result<()> {
         let components = component.map_or_else(|| Component::ALL.to_vec(), |c| vec![c]);
         for component in components {
             let path = self.project.log_file(component);
             println!("=== {} — {} ===", component.as_str(), path.display());
-            match std::fs::read_to_string(&path) {
-                Ok(content) if content.is_empty() => println!("(empty)"),
-                Ok(content) => print!("{content}"),
+            match super::logs::show(&path, all, &mut std::io::stdout().lock()) {
+                Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     println!("(no log yet — `lyracore dev up` has not started this component)");
                 }
@@ -3121,7 +3120,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dev = DevManager::new(project(&tmp)).unwrap();
         // No log files exist yet — this must not error.
-        assert!(dev.logs(None).is_ok());
-        assert!(dev.logs(Some(Component::Gateway)).is_ok());
+        assert!(dev.logs(None, false).is_ok());
+        assert!(dev.logs(Some(Component::Gateway), false).is_ok());
     }
 }

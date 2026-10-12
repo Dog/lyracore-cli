@@ -331,9 +331,9 @@ pub fn run(
     }
     databases(&shards)?;
     check::prepare(project, runner, prompt, options.client_data.as_deref())?;
-    let has_rust = inventory(project)?
-        .iter()
-        .any(|package| package.dir.join("src/mod.rs").is_file());
+    let has_rust = inventory(project)?.iter().any(|package| {
+        package.state == super::PackageState::Enabled && package.dir.join("src/mod.rs").is_file()
+    });
 
     // ---- preflight: the artifacts, once, before any target is touched ----
     let root = project.packages_dir();
@@ -2169,6 +2169,35 @@ mod tests {
         assert_eq!(writes.len(), 4, "{writes:?}");
         assert!(writes[0].ends_with("one") && writes[1].contains("one debug_repair_after_publish"));
         assert!(writes[2].ends_with("two") && writes[3].contains("two debug_repair_after_publish"));
+    }
+
+    #[test]
+    fn disabled_rust_without_pending_teardown_does_not_publish() {
+        let checkout = Checkout::new();
+        checkout.with_rust();
+        std::fs::create_dir_all(checkout.project.packages_disabled_dir()).unwrap();
+        std::fs::rename(
+            checkout.project.packages_dir().join("greeter"),
+            checkout.project.packages_disabled_dir().join("greeter"),
+        )
+        .unwrap();
+        let stack = FakeStack::new();
+        run(
+            &checkout.project,
+            &stack.runner(),
+            &ScriptedPrompt::new(&[]),
+            &checkout.options_without_client_data(&["one"]),
+        )
+        .unwrap();
+        assert!(
+            !stack
+                .rendered()
+                .iter()
+                .any(|call| call.contains("spacetime publish")
+                    || call.contains("debug_repair_after_publish")),
+            "{:?}",
+            stack.rendered()
+        );
     }
 
     #[test]

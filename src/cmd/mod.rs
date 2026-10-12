@@ -6,11 +6,11 @@ pub mod dev;
 pub mod doctor;
 mod gateway_log;
 pub mod import;
+mod logs;
 pub mod packages;
 pub mod preflight;
 pub mod production;
 pub mod publish;
-pub mod service;
 pub mod update;
 
 use crate::project::{ClientBind, Component, Topology};
@@ -18,188 +18,8 @@ use crate::{Error, Result};
 use account::PasswordSource;
 use import::{ImportOptions, VmapOptions};
 
-/// The default help: just enough to get a newcomer from a fresh checkout to a running server.
-/// Everything else — the commands you only need once you're developing LyraCore itself — lives in
-/// [`USAGE_ALL`], reached with `lyracore help --all`.
-pub const USAGE: &str = "\
-lyracore: run a local LyraCore vanilla WoW Realm
-
-USAGE:
-  lyracore doctor          check the prerequisites for `dev up`
-  lyracore dev up          publish and start the local Realm for setup
-  lyracore account create USER
-                           provision an Account with your chosen password
-  lyracore import          import world content from public game data and
-                           your own 1.12.1 client before play
-  lyracore dev check       check imported content on every playable Shard
-  lyracore dev status      report the running processes and published Shards
-  lyracore dev down        stop the local Realm
-
-Run `lyracore help --all` to see every command.";
-
-/// The full command surface, including the contributor-facing corners `USAGE` leaves out.
-pub const USAGE_ALL: &str = "\
-lyracore — local LyraCore development
-
-USAGE:
-  lyracore doctor                              check whether your machine is ready for `dev up`
-  lyracore preflight                           the offline deploy gate: build, schema, filters
-  lyracore publish [DATABASE ...]              preflight, then publish the module. With no
-                                               names, publishes every database of the active
-                                               fixture topology (the default sharded topology
-                                               if none is recorded); named databases are
-                                               published exactly as given. Takes database
-                                               NAMES only — SpacetimeDB's data-wiping -c flag
-                                               is deliberately not exposed here
-  lyracore publish --skip-preflight [DB ...]   publish without running the offline checks
-                                               (preflight) first
-  lyracore dev up                              start (or reuse) the local realm: four databases
-                                               — Eastern Kingdoms, Kalimdor, the instance pool,
-                                               and realm-core
-  lyracore dev up --single                     a one-database setup instead, for a quicker
-                                               local test — skips the multi-database sharded
-                                               configuration
-  lyracore dev up --lan <IP>                   also serve clients on this machine's private-LAN
-                                               address (SpacetimeDB stays on loopback)
-  lyracore dev status                          report each component's state, and each
-                                               database's own published/connected verdict
-  lyracore dev logs [spacetime|gateway]        show a component's log file
-  lyracore dev check                           check imported content on World Shards and the
-                                               Instance Pool, without changing their content
-  lyracore dev smoke ACCOUNT CHARACTER [--password-stdin]
-                                               check content, then run the pinned Headless Client
-                                               with your Account password
-  lyracore dev down [--forget]                 stop the processes this CLI started
-  lyracore account create USER [--password-stdin]
-                                               provision an account's SRP6 credentials
-  lyracore import [--client-data PATH]         import the playable world: Alliance early-game corridors
-                                               in Eastern Kingdoms and Kalimdor, plus the
-                                               instance maps. Pulls cmangos' classic-db,
-                                               reads your own 1.12.1 client's Data/ archives,
-                                               drives the importer and asserts the FLOOR_*
-                                               import floors on every destination. Asks for
-                                               consent first, every time
-  lyracore import world --profile-shard PROFILE=SHARD
-                                               explicitly assign all three sharded World Import
-                                               Profiles on an external realm. For each continent,
-                                               choose either alliance-* or starting-*; the latter
-                                               also includes Horde starting areas. Assign instances
-                                               as the third profile, using a distinct Shard for each
-  lyracore import world --accept               the same command by its full name (`import`
-                                               is its alias), with the consent answered in
-                                               advance (scripted runs)
-  lyracore import check [--profile-shard PROFILE=SHARD ...]
-                                               check imported content at the same destinations
-                                               selected by `import world`
-  lyracore import vmaps [--client-data PATH]   exact model/WMO collision triangles for each
-                                               populated World Shard, including Kalimdor,
-                                               read from your own client's archives — nothing
-                                               is fetched, so there is no consent gate
-  lyracore config                              show the persisted client-data path (or \"(unset)\")
-  lyracore config set client-data PATH         validate and remember your 1.12.1 client's Data/
-                                               directory, so `import` and `doctor` stop asking
-  lyracore client sync                         pack patch-3.MPQ and every enabled Package's
-                                               addons, then install them into the configured
-                                               client-data path. Warns (best-effort) about an
-                                               addon a disabled or removed Package left behind
-  lyracore client pack --out DIR [--zip]       build the Client Artifact: package-authored
-                                               content only, as DIR/Data/patch-3.MPQ and
-                                               DIR/Interface/AddOns/. Never touches the configured
-                                               client. --zip also writes DIR.zip
-  lyracore character gm NAME true|false        grant (true) or revoke (false) GM level for a
-                                               character — tries every world shard in turn
-  lyracore packages add FOLDER|GIT-URL|NAME [--yes]
-                                               install a Package from a folder on this machine,
-                                               from a repository whose root is one Package, or by
-                                               bare NAME from the Official Package Collection:
-                                               copies it into packages/, records where it came from
-                                               (and the exact commit, for a Git Package Source or
-                                               the collection), prints a deterministic review of
-                                               the tables, reducers, hooks, addons and client
-                                               overrides it registers, asks before copying, then
-                                               runs preflight. It never publishes — it prints the
-                                               steps left
-  lyracore packages update [NAME] [--yes]      advance a Git-backed Package to the repository's
-                                               current commit, or every Git-backed Package when no
-                                               name is given. Refuses a folder that has drifted
-                                               from its recorded content identity, reviews and asks
-                                               before replacing it, and keeps the previous revision
-                                               until the new one preflights
-  lyracore packages enable NAME                move a disabled Package back into packages/, where
-                                               the build compiles it again. Its provenance stamp
-                                               travels with the folder
-  lyracore packages disable NAME [--yes]       move an enabled Package into .lyracore/packages-
-                                               disabled/, out of the build's sight but still on
-                                               disk. With the dev stack up, asks, then runs
-                                               Package Teardown on every Shard first, so the next
-                                               publish can remove the Package's tables
-  lyracore packages remove NAME [--yes]        delete a DISABLED Package from this checkout. Asks
-                                               first, and refuses a folder that no longer matches
-                                               its recorded content identity, because those local
-                                               changes exist nowhere else
-  lyracore packages apply [DATABASE ...] [--check] [--yes] [--force-all]
-                                               prepare installed sources, publish the Module for
-                                               Rust Packages, then apply artifacts to each Shard.
-                                               Defaults to the recorded development topology.
-                                               --check prepares and validates without Realm writes;
-                                               --force-all also applies matching artifacts.
-                                               --client-data PATH supplies the client Data directory
-  lyracore packages config NAME [KEY [VALUE]] [--new]
-                                               read and write an installed Package's Package Config
-                                               — the durable key-values it reads at runtime. With no
-                                               KEY it lists every key; with a KEY it prints that
-                                               value; with a VALUE it writes the key to EVERY Shard
-                                               of the fixture topology, because the rows are
-                                               per-Shard state. A read reports a key the Shards
-                                               disagree about rather than picking one answer. --new
-                                               creates a key the Package never seeded; without it
-                                               the Module refuses an unknown key and names the ones
-                                               it does have
-  lyracore packages build                      regenerate the Module schema typings into
-                                               datascripts/generated/, install the pinned Bun
-                                               dependencies from datascripts/bun.lock, then
-                                               typecheck every Datascript against them. Author-side
-                                               only: applying a prebuilt Package needs no Bun
-  lyracore packages check                      verify every enabled Package's generated artifact
-                                               against its recorded Build Identity: the Datascript
-                                               source, generated typings, Base Snapshot, authoring
-                                               library and toolchain pins it was built from.
-                                               Regenerates the typings fresh, so a Module schema
-                                               change is caught even on a clean checkout. Refuses
-                                               naming the specific input that changed and the
-                                               rebuild command; a missing Base Snapshot is reported
-                                               unverifiable rather than failing. `preflight` (and so
-                                               `publish`) runs the same check
-  lyracore packages list                       every installed Package: enabled or disabled, its
-                                               Package Source, its recorded content identity,
-                                               whether the installed copy has drifted from it,
-                                               and what it registers
-  lyracore packages new NAME [--from RUNG]      copy a Reference Package from the collection tag for
-                                               this checkout's Package API. Defaults to example-script.
-                                               Other rungs: example-client, example-data, example-rust,
-                                               example-all. Records the rung and revision, renames
-                                               source and runs preflight. Build new artifacts with
-                                               `packages build` after choosing distinct IDs
-  lyracore production status --server URI --gateway-log PATH --realm-core DB DATABASE ...
-                                               read-only production topology, schema, connection,
-                                               realm-core and listener verdicts
-  lyracore service reconcile                   make a PRODUCTION host's spacetimedb-standalone
-                                               service match the unit tracked in the checkout.
-                                               Root only: it updates the checkout to origin/main
-                                               (refusing over a dirty working tree, as `update`
-                                               does), checks the host prerequisites the unit
-                                               names, refuses when another active service already
-                                               owns the same data directory or listen address,
-                                               installs the unit into /etc/systemd/system, reloads
-                                               systemd, enables and restarts the node, then
-                                               verifies its ActiveState, LimitNOFILE and stderr
-                                               destination. It never creates, moves or deletes the
-                                               node's data directory
-  lyracore update                              pull the latest checkout in place and restart the
-                                               local dev stack (refuses over a dirty working tree)
-
-The password is read from stdin with --password-stdin, otherwise from a hidden terminal
-prompt. It is never passed as a command-line argument.";
+pub mod help;
+pub use help::{USAGE, USAGE_ALL};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
@@ -216,7 +36,10 @@ pub enum Command {
         topology: Topology,
     },
     DevStatus,
-    DevLogs(Option<Component>),
+    DevLogs {
+        component: Option<Component>,
+        all: bool,
+    },
     DevCheck,
     DevSmoke {
         account: String,
@@ -288,24 +111,31 @@ pub enum Command {
     PackagesApply(packages::apply::ApplyOptions),
     PackagesConfig(packages::config::ConfigOptions),
     ProductionStatus(production::StatusOptions),
-    /// The one root-only, system-state verb on this surface, deliberately its own: `update` stays
-    /// a contributor's git-pull replacement and owns no service.
-    ServiceReconcile,
-    Update,
+    Update {
+        reset_mirror: bool,
+    },
     Help,
     HelpAll,
+    HelpTopic(String),
 }
 
 impl Command {
     pub fn parse(args: &[String]) -> Result<Self> {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        if args.len() > 1 && matches!(args.last(), Some(&"--help" | &"-h")) {
+            let topic = args[..args.len() - 1].join(" ");
+            help::topic(&topic)?;
+            return Ok(Command::HelpTopic(topic));
+        }
         match args.as_slice() {
             [] => Ok(Command::Help),
             ["-h"] | ["--help"] | ["help"] => Ok(Command::Help),
             ["help", "--all"] => Ok(Command::HelpAll),
-            ["help", other, ..] => Err(Error::Usage(format!(
-                "`lyracore help` takes no arguments other than --all (got '{other}')"
-            ))),
+            ["help", topic @ ..] => {
+                let topic = topic.join(" ");
+                help::topic(&topic)?;
+                Ok(Command::HelpTopic(topic))
+            },
 
             ["doctor"] => Ok(Command::Doctor),
             ["preflight"] => Ok(Command::Preflight),
@@ -342,14 +172,20 @@ impl Command {
             ["dev", "smoke", ..] => Err(Error::Usage("`dev smoke` needs ACCOUNT CHARACTER [--password-stdin]".to_string())),
             ["dev", "down"] => Ok(Command::DevDown { forget: false }),
             ["dev", "down", "--forget"] => Ok(Command::DevDown { forget: true }),
-            ["dev", "logs"] => Ok(Command::DevLogs(None)),
-            ["dev", "logs", name] => Component::parse(name)
-                .map(|c| Command::DevLogs(Some(c)))
-                .ok_or_else(|| {
-                    Error::Usage(format!(
-                        "unknown component '{name}' — expected one of: spacetime, gateway"
-                    ))
-                }),
+            ["dev", "logs", rest @ ..] => {
+                let mut component = None;
+                let mut all = false;
+                for arg in rest {
+                    match *arg {
+                        "--all" if !all => all = true,
+                        name if component.is_none() => {
+                            component = Some(Component::parse(name).ok_or_else(|| Error::Usage(format!("unknown log component or option '{name}'; use spacetime, gateway, or --all")))?);
+                        }
+                        other => return Err(Error::Usage(format!("unexpected dev logs argument '{other}'"))),
+                    }
+                }
+                Ok(Command::DevLogs { component, all })
+            },
             ["dev"] => Err(Error::Usage(
                 "`dev` needs a subcommand: up, status, check, logs, smoke, down".to_string(),
             )),
@@ -459,11 +295,7 @@ impl Command {
                 Ok(Command::PackagesRemove { name, yes })
             }
             ["packages", ..] => Err(Error::Usage(
-                "`packages` supports: add FOLDER|GIT-URL [--yes], build, check, config NAME [KEY \
-                 [VALUE]] [--new], disable NAME [--yes], enable NAME, list, new NAME, remove NAME \
-                 [--yes], apply [DATABASE ...] [--check] [--yes] [--force-all], update [NAME] \
-                 [--yes]"
-                    .to_string(),
+                "unknown or incomplete packages command; run `lyracore packages --help`".into(),
             )),
 
             ["production", "status", rest @ ..] => parse_production_status(rest),
@@ -473,22 +305,14 @@ impl Command {
                     .to_string(),
             )),
 
-            // One subverb today. The catch-alls below name it, the way `client` and `character`
-            // do, rather than reporting "unknown command" for a group that exists.
-            ["service", "reconcile"] => Ok(Command::ServiceReconcile),
-            ["service", "reconcile", other, ..] => Err(Error::Usage(format!(
-                "`service reconcile` takes no arguments (got '{other}')"
-            ))),
-            ["service"] => Err(Error::Usage(
-                "`service` needs a subcommand: reconcile".to_string(),
+            ["service", ..] => Err(Error::Usage(
+                "host service administration moved to `lyracore-ops service reconcile`; it uses the checked-out unit without updating source".into(),
             )),
-            ["service", other, ..] => Err(Error::Usage(format!(
-                "unknown `service` subcommand '{other}' — expected reconcile"
-            ))),
 
-            ["update"] => Ok(Command::Update),
+            ["update"] => Ok(Command::Update { reset_mirror: false }),
+            ["update", "--reset-mirror"] => Ok(Command::Update { reset_mirror: true }),
             ["update", other, ..] => Err(Error::Usage(format!(
-                "`update` takes no arguments (got '{other}')"
+                "`update` accepts only --reset-mirror (got '{other}')"
             ))),
 
             [other, ..] => Err(Error::Usage(format!("unknown command '{other}'"))),
@@ -1117,7 +941,13 @@ mod tests {
                 source: PasswordSource::Tty,
             }
         );
-        assert_eq!(parse("dev logs").unwrap(), Command::DevLogs(None));
+        assert_eq!(
+            parse("dev logs").unwrap(),
+            Command::DevLogs {
+                component: None,
+                all: false
+            }
+        );
         assert_eq!(
             parse("dev down").unwrap(),
             Command::DevDown { forget: false }
@@ -1146,7 +976,10 @@ mod tests {
     fn logs_can_name_a_component() {
         assert_eq!(
             parse("dev logs gateway").unwrap(),
-            Command::DevLogs(Some(Component::Gateway))
+            Command::DevLogs {
+                component: Some(Component::Gateway),
+                all: false
+            }
         );
         assert!(parse("dev logs realm-core").is_err());
     }
@@ -2084,22 +1917,23 @@ mod tests {
     }
 
     #[test]
-    fn packages_without_a_recognised_verb_names_the_nine_that_exist() {
-        for line in ["packages", "packages install greeter", "packages upgrade"] {
-            let error = parse(line).unwrap_err().to_string();
-            for verb in PACKAGES_VERBS {
-                assert!(error.contains(verb), "{line}: {error}");
-            }
+    fn unknown_packages_commands_point_to_the_catalogue_help() {
+        for line in ["packages", "packages invented", "packages --bogus"] {
+            let error = parse(line).unwrap_err();
+            assert_eq!(error.exit_code(), crate::error::EXIT_USAGE);
+            assert!(
+                error.to_string().contains("lyracore packages --help"),
+                "{error}"
+            );
         }
     }
 
-    const PACKAGES_VERBS: [&str; 9] = [
-        "add", "build", "check", "disable", "enable", "list", "new", "remove", "update",
-    ];
-
     #[test]
     fn the_help_text_documents_packages() {
-        for verb in PACKAGES_VERBS {
+        for verb in [
+            "add", "build", "check", "disable", "enable", "list", "new", "remove", "update",
+            "apply", "config",
+        ] {
             assert!(
                 USAGE_ALL.contains(&format!("lyracore packages {verb}")),
                 "{USAGE_ALL}"
@@ -2111,10 +1945,10 @@ mod tests {
 
     #[test]
     fn service_reconcile_takes_no_arguments() {
-        assert_eq!(
-            parse("service reconcile").unwrap(),
-            Command::ServiceReconcile
-        );
+        assert!(parse("service reconcile")
+            .unwrap_err()
+            .to_string()
+            .contains("lyracore-ops service reconcile"));
         for line in [
             "service reconcile --force",
             "service reconcile spacetimedb-standalone.service",
@@ -2138,26 +1972,22 @@ mod tests {
         }
     }
 
-    /// The verb mutates a production host, so the help has to say what it does to one: which
-    /// service, that systemd is reloaded and restarted, what is verified, and that it needs root.
     #[test]
-    fn the_help_text_documents_what_service_reconcile_changes() {
-        for phrase in [
-            "lyracore service reconcile",
-            "spacetimedb-standalone",
-            "/etc/systemd/system",
-            "LimitNOFILE",
-            "Root only",
-        ] {
-            assert!(USAGE_ALL.contains(phrase), "{phrase}: {USAGE_ALL}");
-        }
+    fn developer_help_points_to_the_separate_host_tool() {
+        assert!(USAGE_ALL.contains("lyracore-ops"));
+        assert!(!USAGE_ALL.contains("lyracore service reconcile"));
     }
 
     // ---- update ----
 
     #[test]
     fn update_takes_no_arguments() {
-        assert_eq!(parse("update").unwrap(), Command::Update);
+        assert_eq!(
+            parse("update").unwrap(),
+            Command::Update {
+                reset_mirror: false
+            }
+        );
         assert!(parse("update origin").is_err());
     }
 
@@ -2166,26 +1996,12 @@ mod tests {
         assert!(USAGE_ALL.contains("lyracore update"), "{USAGE_ALL}");
     }
 
-    /// `update` is a contributor's git-pull replacement. Reconciling a host is `service
-    /// reconcile`'s job, so `update`'s whole help entry must not grow a word about services, and
-    /// must not grow at all: it is the two lines it has always been.
     #[test]
-    fn the_update_help_entry_says_nothing_about_services_and_has_not_grown() {
-        let lines: Vec<&str> = USAGE_ALL.lines().collect();
-        let start = lines
-            .iter()
-            .position(|line| line.contains("lyracore update"))
-            .expect("update is in the full help");
-        let entry: Vec<&str> = lines[start..]
-            .iter()
-            .take_while(|line| !line.trim().is_empty())
-            .copied()
-            .collect();
-        assert_eq!(entry.len(), 2, "{entry:?}");
-        let entry = entry.join(" ");
-        for absent in ["service", "systemd", "reconcile", "install", "root", "sudo"] {
-            assert!(!entry.contains(absent), "{absent}: {entry}");
-        }
+    fn update_help_explains_mirror_reset_and_restart() {
+        let help = help::topic("update").unwrap();
+        assert!(help.contains("--reset-mirror"));
+        assert!(help.contains("recovery branch"));
+        assert!(help.contains("does not restart"));
     }
 
     // ---- help ----
@@ -2264,7 +2080,6 @@ mod tests {
             "lyracore packages new",
             "lyracore packages remove",
             "lyracore character gm",
-            "lyracore service reconcile",
             "lyracore update",
             "--password-stdin",
         ] {

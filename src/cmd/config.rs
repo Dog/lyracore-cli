@@ -61,7 +61,10 @@ mod tests {
         // error instead, and cover the value it would have printed via `Config::load` directly.
         let project = checkout(&tmp);
         assert!(show(&project).is_ok());
-        assert_eq!(Config::load(&project.config_file()).unwrap().client_data, None);
+        assert_eq!(
+            Config::load(&project.config_file()).unwrap().client_data,
+            None
+        );
     }
 
     #[test]
@@ -91,7 +94,10 @@ mod tests {
             .to_string();
         assert!(error.contains("no such directory"), "{error}");
         assert!(
-            Config::load(&project.config_file()).unwrap().client_data.is_none(),
+            Config::load(&project.config_file())
+                .unwrap()
+                .client_data
+                .is_none(),
             "a refused path must not be persisted"
         );
     }

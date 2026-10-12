@@ -648,7 +648,13 @@ mod tests {
         let mut options = list_options("greeter");
         options.databases = named.iter().map(|s| s.to_string()).collect();
 
-        run(&checkout.project, &stack.runner(), &FakeHttp::new(), &options).unwrap();
+        run(
+            &checkout.project,
+            &stack.runner(),
+            &FakeHttp::new(),
+            &options,
+        )
+        .unwrap();
 
         let asked = queries(&stack);
         assert_eq!(asked.len(), named.len());

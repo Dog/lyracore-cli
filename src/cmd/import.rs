@@ -3238,14 +3238,16 @@ pub(crate) mod tests {
                 other => panic!("unexpected call kind: {other:?}"),
             })
             .collect();
-        for (needle, shipped) in [("pull-classic-db.sh", ProjectLayout::PULL_CLASSIC_DB_SCRIPT)] {
-            let spec = specs
-                .iter()
-                .find(|s| s.render().contains(needle))
-                .unwrap_or_else(|| panic!("{needle} never ran"));
-            assert_eq!(spec.program(), "bash");
-            assert!(spec.args()[0].ends_with(shipped), "{}", spec.render());
-        }
+        let spec = specs
+            .iter()
+            .find(|s| s.render().contains("pull-classic-db.sh"))
+            .expect("pull-classic-db.sh never ran");
+        assert_eq!(spec.program(), "bash");
+        assert!(
+            spec.args()[0].ends_with(ProjectLayout::PULL_CLASSIC_DB_SCRIPT),
+            "{}",
+            spec.render()
+        );
         // The manifest is SOURCED (bash -c), never executed as a script of its own.
         let floors = specs
             .iter()
