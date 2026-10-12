@@ -1,4 +1,5 @@
 pub mod account;
+pub mod bindings;
 pub mod character;
 pub mod client;
 pub mod config;
@@ -25,6 +26,9 @@ pub use help::{USAGE, USAGE_ALL};
 pub enum Command {
     Doctor,
     Preflight,
+    Bindings {
+        check: bool,
+    },
     Publish {
         /// The database names typed on the command line. Empty means none were — `publish::run`
         /// resolves that against the recorded topology once it has discovered the project.
@@ -138,6 +142,9 @@ impl Command {
             },
 
             ["doctor"] => Ok(Command::Doctor),
+            ["bindings"] => Ok(Command::Bindings { check: false }),
+            ["bindings", "--check"] => Ok(Command::Bindings { check: true }),
+            ["bindings", ..] => Err(Error::Usage("usage: lyracore bindings [--check]".into())),
             ["preflight"] => Ok(Command::Preflight),
             ["preflight", other, ..] => Err(Error::Usage(format!(
                 "`preflight` takes no arguments (got '{other}')"

@@ -42,6 +42,7 @@ struct Inner {
     log_override: Option<String>,
     /// The working copy a `git clone` on this stack produces. See [`FakeStack::with_git_clone`].
     git_clone: Option<PathBuf>,
+    generated_bindings: HashMap<String, String>,
     /// A spawn whose render matches `needle` (0) models a version-manager shim's `exec` (#431):
     /// `identity()` reports `before` (1) on its first read for that PID and `after` (2) on every
     /// read after. See [`FakeStack::with_shim_exec`].
@@ -59,6 +60,15 @@ struct Inner {
 pub struct FakeStack(Arc<Mutex<Inner>>);
 
 impl FakeStack {
+    pub fn with_generated_binding(self, name: &str, content: &str) -> Self {
+        self.0
+            .lock()
+            .unwrap()
+            .generated_bindings
+            .insert(name.into(), content.into());
+        self
+    }
+
     pub fn new() -> Self {
         Self(Arc::new(Mutex::new(Inner {
             next_pid: 4000,
@@ -318,7 +328,7 @@ fn canned_stdout(render: &str) -> String {
 
 /// `spacetime generate` writes a module's bindings into its `--out-dir`. A fake that only recorded
 /// the call would leave the RLS-identifier check (which READS those bindings) unexercisable.
-fn materialize_generated_bindings(cmd: &CommandSpec) {
+fn materialize_generated_bindings(cmd: &CommandSpec, extra: &HashMap<String, String>) {
     let args = cmd.args();
     let Some(index) = args.iter().position(|a| a == "--out-dir") else {
         return;
@@ -329,6 +339,10 @@ fn materialize_generated_bindings(cmd: &CommandSpec) {
     let out = Path::new(out);
     if std::fs::create_dir_all(out).is_err() {
         return;
+    }
+    let _ = std::fs::write(out.join("mod.rs"), "pub mod character_type;\n");
+    for (name, content) in extra {
+        let _ = std::fs::write(out.join(name), content);
     }
     let _ = std::fs::write(
         out.join("game_character_table.rs"),
@@ -377,7 +391,7 @@ impl ProcessRunner for FakeProcessRunner {
         let render = cmd.render();
         self.record(Call::Wait(cmd.clone()), &render)?;
         if render.contains("spacetime generate") {
-            materialize_generated_bindings(cmd);
+            materialize_generated_bindings(cmd, &self.0.lock().unwrap().generated_bindings);
         }
         let git_destination = if render.starts_with("git clone") {
             cmd.args().last().map(Path::new)

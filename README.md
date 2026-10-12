@@ -36,6 +36,9 @@ lyracore help packages apply  # one operation
 The [command reference](docs/commands.md) holds the detailed behavior and safety contracts.
 Full and focused help share one catalogue; a test keeps its documented command list synchronized.
 
+Before a direct Gateway Cargo build or editor check, run `lyracore bindings` to prepare generated
+bindings. `dev up` prepares them automatically. See the [bindings contract](docs/commands.md#bindings).
+
 `packages apply` prepares and activates installed source. Authors can separately use
 `packages build` to produce artifacts and `packages check` to verify existing ones.
 `client sync` installs client content; `client pack --out DIR` builds a distributable artifact.

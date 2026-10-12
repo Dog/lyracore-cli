@@ -35,8 +35,9 @@ macro_rules! commands {
 }
 commands! {
     "doctor", "doctor", "Check prerequisites for dev up.";
+    "bindings", "bindings [--check]", "Prepare Gateway Rust bindings outside the source tree. --check reports freshness as JSON without generating files.";
     "preflight", "preflight", "Validate the deploy build, schema, filters and artifact identities offline.";
-    "publish", "publish [DATABASE ...] [--skip-preflight]", "Publish the module to named databases or the development topology. No data-wiping flags. --skip-preflight bypasses offline checks.";
+    "publish", "publish [DATABASE ...] [--skip-preflight]", "Publish the module to named databases or the development topology. No data-wiping flags. --skip-preflight skips preflight; binding preparation and upgrade checks still run.";
     "dev up", "dev up [--single] [--lan IP]", "Start or reuse four local databases. --single uses one; --lan serves game clients on a private address while SpacetimeDB stays on loopback.";
     "dev status", "dev status", "Report processes, published databases and gateway connections.";
     "dev logs", "dev logs [spacetime|gateway] [--all]", "Show the last 100 lines (up to 64 KiB) per log. --all streams the complete files.";

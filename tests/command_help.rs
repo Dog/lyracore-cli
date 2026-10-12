@@ -9,6 +9,7 @@ fn focused_help_needs_no_checkout_and_performs_no_work() {
         vec!["dev", "up", "--help"],
         vec!["help", "packages", "apply"],
         vec!["update", "--help"],
+        vec!["bindings", "--help"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_lyracore"))
             .args(&args)
