@@ -7,16 +7,9 @@ This is the command reference for `lyracore`. It moved here from the LyraCore re
 > is the clone → running realm → connected client path, with prerequisites and troubleshooting.
 > This page is the CLI's command and safety contract.
 
-`lyracore` runs the local developer fixture — since #327 a **sharded** one, four databases split
-along the continental divide and the open-world/instance one
-(§"Sharded out of the box, on purpose"; `--single` collapses it back to one). It
-deliberately does not manage production realms, backups, or the installation of Rust and
-SpacetimeDB. The one system service it can touch is the Standalone Supervisor tracked in this
-checkout, and only when [`service reconcile`](#service-reconcile--make-a-host-match-the-tracked-unit)
-asks it to.
-
-**The CLI lives in its own repository**, [`LyraCoreProject/lyracore-cli`](https://github.com/LyraCoreProject/lyracore-cli).
-This repo does not vendor it.
+`lyracore` runs a local developer realm, imports content, manages Packages and inspects an
+explicit production topology. It does not install Rust or SpacetimeDB or manage backups.
+Host service administration lives in the separate [`lyracore-ops` tool](operations.md).
 
 ## Running it
 
@@ -45,75 +38,48 @@ was private, which meant a fresh clone's very first command failed for anyone bu
 
 ## Commands
 
+<!-- command-reference:start -->
 ```text
+lyracore help [--all | COMMAND ...]
 lyracore doctor
 lyracore bindings [--check]
 lyracore preflight
 lyracore publish [DATABASE ...] [--skip-preflight]
-lyracore dev up [--lan <IP>]
+lyracore dev up [--single] [--lan IP]
 lyracore dev status
+lyracore dev logs [spacetime|gateway] [--all]
 lyracore dev check
-lyracore dev logs [spacetime|gateway]
 lyracore dev smoke ACCOUNT CHARACTER [--password-stdin]
 lyracore dev down [--forget]
 lyracore account create USER [--password-stdin]
-lyracore account alpha-test-tools enrollment REALM_CORE [true|false]
-lyracore account alpha-test-tools grant|revoke REALM_CORE ACCOUNT
-lyracore import [--accept] [--client-data PATH]
+lyracore character gm NAME true|false
+lyracore import [--accept] [--client-data PATH] [--profile-shard PROFILE=SHARD ...]
+lyracore import world [--accept] [--client-data PATH] [--profile-shard PROFILE=SHARD ...]
+lyracore import check [--profile-shard PROFILE=SHARD ...]
+lyracore import vmaps [--client-data PATH] [--profile-shard PROFILE=SHARD ...]
 lyracore config
 lyracore config set client-data PATH
 lyracore client sync
 lyracore client pack --out DIR [--zip]
 lyracore packages add FOLDER|GIT-URL|NAME [--yes]
-lyracore packages build
-lyracore packages check
-lyracore packages config NAME [KEY [VALUE]] [--new]
-lyracore packages disable NAME [--yes]
+lyracore packages update [NAME] [--yes]
 lyracore packages enable NAME
-lyracore packages list
-lyracore packages new NAME [--from RUNG]
+lyracore packages disable NAME [--yes]
 lyracore packages remove NAME [--yes]
 lyracore packages apply [DATABASE ...] [--check] [--yes] [--force-all] [--client-data PATH]
-lyracore packages update [NAME] [--yes]
-lyracore character gm NAME true|false
-lyracore production status --server SERVER --gateway-log PATH --realm-core DB DATABASE ...
-lyracore service reconcile
-lyracore update
+lyracore packages config NAME [KEY [VALUE]] [--new] [--database NAME ...]
+lyracore packages build
+lyracore packages check
+lyracore packages list
+lyracore packages new NAME [--from RUNG]
+lyracore production status --server URI --gateway-log PATH --realm-core DB DATABASE ...
+lyracore update [--reset-mirror]
 ```
+<!-- command-reference:end -->
 
-| Command | What it is |
-| --- | --- |
-| `doctor` | are the prerequisites for `dev up` present? |
-| `preflight` | the OFFLINE deploy gate — the same five checks the core repo's own pre-publish gate runs, natively |
-| `publish` | the ONE correct `spacetime publish`, with the two mandatory flags and no path to a wipe |
-| `dev up` | start (or reuse) the loopback fixture — four databases: two world shards, the instance pool, realm-core (`--single` for one) |
-| `dev status` | process identity, endpoint, and whether the database is actually published |
-| `dev logs` | tail the components this CLI started |
-| `dev smoke` | check content, then log in with your chosen Account and Character through the pinned Headless Client |
-| `dev check` | check imported content on each local World Shard and Instance Pool |
-| `import check` | check imported content using explicit World Import Profile assignments |
-| `dev down` | stop only the processes this CLI started, and only if the PID is still ours |
-| `account create` | provision an account's SRP6 credentials without a password in `argv` |
-| `account alpha-test-tools` | read or set automatic enrollment, or grant or revoke one Account |
-| `import` | import playable content into each selected World Shard and Instance Pool after consent |
-| `config` | show, or set, the client-data path `import` and `doctor` remember |
-| `client sync` | pack `patch-3.MPQ` and every enabled Package's addons, then install them into the configured client |
-| `client pack` | build the Client Artifact a player installs: package-authored content only, into a directory of your choosing |
-| `packages add` | install a Package from a folder on this machine, from a Git URL, or by bare name from the Official Package Collection, after a trust review and a confirmation |
-| `packages build` | regenerate the Module schema typings, typecheck every Datascript against them, then emit and validate each enabled Package's Package Delta and Script Artifact |
-| `packages check` | verify every enabled Package's generated artifact against its recorded Build Identity, regenerating the Module typings fresh |
-| `packages config` | read a Package's key-values, or write one to every Shard of the fixture topology |
-| `packages disable` | run Package Teardown on every Shard, then move the Package out of the build's sight, keeping it on disk |
-| `packages enable` | move a disabled Package back into the build |
-| `packages list` | every installed Package: enabled or disabled, where it came from, and whether it has drifted |
-| `packages new` | copy and rename a Reference Package from the collection tag matching this checkout's Package API |
-| `packages remove` | delete a disabled Package, after a confirmation and a check for local changes |
-| `packages apply` | prepare installed sources, publish Rust Packages, and apply artifacts to the named Shards or recorded development topology |
-| `packages update` | update Git Package Sources from their repository and Official Package Sources from the compatible collection tag |
-| `character gm` | flip GM commands on or off for a character, on whichever world shard has it |
-| `production status` | read-only checks for an explicitly named production topology and the latest gateway start |
-| `service reconcile` | make a production host's Standalone Supervisor match the unit tracked in this checkout. Root only |
-| `update` | pull the latest LyraCore into this checkout and tell you how to restart it |
+Use `lyracore help --all` for the complete descriptions, `lyracore packages --help` for a
+command family, or `lyracore help packages apply` for one operation. Full and focused help
+come from the same catalogue; tests keep the command list above in sync with it.
 
 **The CLI shells out to nothing in `scripts/`.** It drives this checkout through its *files* —
 `Cargo.toml`, `rust-toolchain.toml`, `module/`, `scripts/*.sh` (read, not run), `.wire-harness-rev`.
@@ -269,8 +235,9 @@ that folder said at the time. A symlink anywhere inside the candidate is refused
 reason. A `.git` directory is skipped.
 
 The install then writes a **Provenance Stamp** — `packages/<name>/.lyracore-package.toml`, holding
-the Package Source, the Content Identity of what was copied, and the install time — and runs
-`preflight`. A Git Package Source records one key more: the exact commit that was installed.
+the Package Source, the Content Identity of what was copied, and the install time.
+Server content runs `preflight`; a client-only Package skips the module build and is validated
+when `client sync` or `client pack` packs its content. A Git Package Source records one key more: the exact commit that was installed.
 
 **An argument that looks like a URL is a Git Package Source.** `https://`, `http://`, `ssh://`,
 `git://` and the scp-style `git@host:path` are cloned. Everything else is a path on this machine, as
@@ -315,7 +282,8 @@ The checkout's Package API version selects its tag, as with `packages add`. The 
 `example-rust` and `example-all`. A missing tag or rung leaves the Package Inventory unchanged.
 
 The command copies the source into `packages/NAME/`, renames Package names, Rust identifiers and
-client filenames, prints its Trust Review and runs `preflight`. The Provenance Stamp keeps the
+client filenames and prints its Trust Review. Server-content scaffolds run `preflight`;
+client-only scaffolds are validated when packed. The Provenance Stamp keeps the
 `scaffold` kind and records the chosen rung and exact collection revision. `packages update`
 does not replace scaffolded code.
 
@@ -417,8 +385,10 @@ somewhere else. That is `packages remove`'s rule, for the same reason: local edi
 copy are recorded nowhere, and neither command can get them back.
 
 **The previous revision is kept until the new one is proven.** The old folder moves out of the
-inventory, the new revision installs in its place, and `preflight` runs. A disabled Package stays
-disabled and is excluded from compilation. The old folder is deleted only after `preflight` passes. If anything fails, the previous revision goes back byte for byte,
+inventory and the new revision installs in its place. Enabled server-content changes run
+`preflight`, including changes that remove server content. Disabled Packages remain disabled and
+skip module validation, as do client-only changes. All candidates still undergo shape, source-drift
+and Trust Review checks. The old folder is deleted only after the applicable checks pass. If anything fails, the previous revision goes back byte for byte,
 the candidate is discarded, and the error names both commits. `update` publishes nothing and
 synchronizes no client; it prints the steps it did not run.
 
@@ -464,8 +434,11 @@ cause is fixed rewrites the Shards that already took the value, which changes no
 A **Datascript** is author-time TypeScript that describes game data. It is written against the
 Module's own schema, so the names and types in it cannot drift from the Module. `packages build`
 enforces that and, once a Package has a Datascript, turns it into a validated Package Delta. The
-same command compiles a Package's **Runtime Scripts** into its Script Artifact. A version gate,
-then up to eight steps, in this order:
+same command compiles a Package's **Runtime Scripts** into its Script Artifact.
+The enabled source inventory determines the work: no sources means no Bun or schema generation;
+existing artifacts are still validated and artifacts whose last Runtime Script source was removed
+are retired. Runtime-script-only builds need Bun and the locked dependencies, but no schema
+typings or Datascript typecheck. With Datascripts, the steps are:
 
 0. `bun --version` must match the checkout's pin. A hard failure, not a warning: the next two steps
    run `bun install` and the locked `tsc` for real, against whatever Bun is on `PATH`.
@@ -477,8 +450,8 @@ then up to eight steps, in this order:
 3. `tsc --noEmit` typechecks Core's Datascript project and each enabled Package's local Datascripts.
    The CLI extends Core's compiler configuration in a temporary file. No JavaScript is emitted.
 
-Steps 4 to 8 run only when an enabled Package carries a Datascript or a Runtime Script. A checkout
-with neither builds exactly as it did before those steps existed:
+Steps 1 and 3 are Datascript-only. Step 7 also validates source-free artifacts without a Bun
+installation. Artifact production and identity recording continue as follows:
 
 4. The Base Snapshot must already exist at `datascripts/generated/base-snapshot.json`, or the build
    fails fast with the exact `lyracore-importer --spell-snapshot` command to build one, once, rather
@@ -548,7 +521,7 @@ The Build Identity covers both source directories, so editing either requires a 
 
 ### Bun is author-side only
 
-`packages build` needs Bun. `packages apply` runs that build when installed sources need new
+`packages build` needs Bun only when enabled Package sources need compilation. `packages apply` runs that build when installed sources need new
 artifacts. **An Operator applying a prebuilt Package needs no Bun and no Node.** Nothing in
 `dev up`, `preflight`, `publish` or `client sync` invokes a JavaScript toolchain. That is why
 `doctor` reports a missing or different Bun version as a warning and never as a launch blocker.
@@ -672,7 +645,8 @@ Local generated files can change during a check.
 If the Package Inventory contains Rust, or a target records pending Package Teardown, `apply`
 publishes this checkout's Module. It keeps the normal preflight and Loot Roll upgrade checks and
 repairs schedules on each published Shard before continuing. Rust Packages cause a publish on
-every run; artifact provenance does not track compiled Rust. Disable a Rust Package through
+every run, including disabled Packages whose code may still be deployed after an offline disable;
+artifact provenance does not track compiled Rust. Disable a Rust Package through
 `packages disable` before removing it so its tables and Characters receive Package Teardown.
 
 Each Shard completes its publish and schedule repair, when needed, before applying artifacts.
@@ -1134,27 +1108,6 @@ unset — per `gateway/src/config.rs`, an unconfigured shard map collapses every
 you are debugging something that is not about sharding, when RAM is tight (four databases cost more
 than one), or to establish whether a bug is a sharding bug at all.
 
-## `account alpha-test-tools` controls
-
-```bash
-./lyracore account alpha-test-tools enrollment lyracore-realm
-./lyracore account alpha-test-tools enrollment lyracore-realm true
-./lyracore account alpha-test-tools enrollment lyracore-realm false
-./lyracore account alpha-test-tools grant lyracore-realm ACCOUNT
-./lyracore account alpha-test-tools revoke lyracore-realm ACCOUNT
-```
-
-The first command reads whether genuinely new Accounts receive Alpha Test Tools. Adding `true` or
-`false` enables or disables that automatic enrollment. It does not change existing Accounts.
-`grant` and `revoke` change one existing Account, with the name normalized to uppercase as it is
-during provisioning.
-
-Every form requires the Realm-core database name. Use `lyracore-realm` for the default sharded
-fixture and `lyracore` under `dev up --single`. The CLI refuses a missing target, invalid boolean or
-action, and a missing Account name before it sends a request. It authenticates the read and every
-Operator-only change with the coordinator credential that `dev up` resolved. The credential stays
-out of arguments, rendered commands, and output.
-
 ## `character gm` — grant or revoke GM commands
 
 ```bash
@@ -1219,65 +1172,46 @@ zeroized buffer, and is absent from rendered commands, logs, error messages, and
 printf 'hunter2' | ./lyracore account create ALICE --password-stdin
 ```
 
-## `service reconcile` — make a host match the tracked unit
+## Host administration
 
-```bash
-sudo ./lyracore service reconcile
-```
+`lyracore service reconcile` has moved to `lyracore-ops service reconcile`.
+See [Host operations](operations.md) for installation and the reconciliation contract.
+It does not fetch or reset the Core checkout.
 
-For a **production host** only, and the encoded form of the manual install in
-[`docs/danger-zones.md`](https://github.com/LyraCoreProject/LyraCore/blob/main/docs/danger-zones.md) §3. It makes the host's Standalone Supervisor match
-`deploy/systemd/spacetimedb-standalone.service` in this checkout. Service Reconciliation is one
-job, so the verb owns the git steps too:
-
-1. `id -u`, before the fetch. The plan resets the checkout and then writes to
-   `/etc/systemd/system`, so it asks for the privilege once rather than stopping halfway for a
-   password.
-2. The same checkout update `update` does. A tracked local edit still refuses everything, the
-   service change included.
-3. The host prerequisites the unit names: its `User=` account, its `ExecStart` binary, its
-   `--data-dir`, and the directory holding its `StandardError=append:` log. Each missing one is a
-   refusal naming the command that fixes it. None is created for you.
-4. Conflicting-service detection. Every active unit whose `ExecStart` or `WorkingDirectory` claims
-   the same data directory or listen address. A hand-rolled legacy `spacetimedb.service` is named
-   and refused, never migrated and never stopped on your behalf, so two nodes cannot race for one
-   port and one data directory.
-5. `install -o root -g root -m 0644` into `/etc/systemd/system/`, then `systemctl daemon-reload`,
-   `enable`, `restart`.
-6. Verification. `systemctl show` must report `ActiveState=active` plus the `LimitNOFILE` and
-   `StandardError` the tracked unit declares. A node that came back with the inherited
-   1024-descriptor ceiling is reported as NOT reconciled instead of passing.
-
-Every expected value is read out of the tracked unit rather than duplicated in the CLI, so it
-cannot certify a host against a contract this checkout no longer ships. The node's persistent
-database directory is only ever checked for existence: never created, moved or deleted. Two runs
-converge on the same end state, and it runs even when the checkout already sits on `origin/main`,
-because deployment drift is independent of git drift. It restarts the node every time, so every run
-costs a short outage.
-
-Steps 3 to 6 read the host before they change it, so a refusal there leaves the checkout on
-`origin/main` and the host as it was. The reset in step 2 comes first on purpose: the unit to
-install, and the contract to check the host against, are read out of the updated checkout.
-
-No gateway rebuild, module publish or schema migration is implied. Those stay operator decisions.
-
-## `update` — pull and restart
+## `update` — update Core and print restart instructions
 
 ```bash
 ./lyracore update
+./lyracore update --reset-mirror  # only when replacing rewritten mirror history
 ```
 
-Fetches `origin`, then refuses — listing the files — if the checkout has any **tracked** edit;
-untracked files are fine. The next step is a `git reset --hard origin/main`, and the refusal exists
-so that step never has anything of yours to discard. A clean tree at the same commit as `origin/main`
-prints "already up to date" and does nothing else. Otherwise it reads `.lyracore-cli-rev` before
-resetting, resets, and prints the old and new commit — plus a note if the CLI pin itself moved,
-since that revision installs on the *next* `lyracore` invocation, not this one.
+An ordinary update refuses tracked edits, fetches `origin`, and checks for commits in `HEAD`
+that are absent from `origin/main`. Any such commits stop the update, including a clean local
+branch ahead of the remote. Reconcile development branches with Git yourself. Otherwise the
+checkout moves to the fetched revision using `git reset --keep`.
 
-It does not restart anything for you: it prints `./lyracore dev down && ./lyracore dev up` as the
-following step, the same rebuild-and-republish restart §"Everyday commands" in the quickstart
-documents, because a schema change coming in on the pull needs every fixture database republished,
-not just a process restart.
+Some mirror releases replace history rather than advancing it. `--reset-mirror` explicitly
+allows that replacement and first retains the old revision on a local
+`lyracore-backup/<full-commit-sha>` branch. The printed branch can be inspected or switched to
+for recovery. This option still refuses tracked edits and incoming paths that overlap untracked
+or ignored files/directories. Unrelated untracked files are preserved. A failed update leaves
+any recovery branch in place. If the recovery branch already exists, the update refuses to
+overwrite it; rename that branch with Git before retrying.
+
+A checkout already at `origin/main` reports that it is current. When the CLI pin changes, the
+new revision installs on the next `lyracore` invocation.
+
+Nothing restarts automatically. To rebuild and republish after an update, run:
+
+```bash
+./lyracore dev down && ./lyracore dev up
+```
+
+## `dev logs` — bounded output
+
+`lyracore dev logs [spacetime|gateway]` shows the last 100 lines of each selected log,
+capped at 64 KiB per file. `--all` streams the complete files without loading them into memory.
+Neither form follows future output.
 
 ## Exit codes
 

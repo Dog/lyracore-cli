@@ -395,7 +395,6 @@ impl ProjectLayout {
     /// harness's own adapter seam; a release that also carries a suite entrypoint is preferred.
     pub const HARNESS_SMOKE_SEAM: &'static str = "adapters/lyracore/wire.sh";
     pub const HARNESS_CLIENT_BIN: &'static str = "vanilla-wire";
-    /// The fixture account and character the login smoke signs in as.
 
     // The database is loopback in every mode. Only the two client-facing ports follow the
     // `ClientBind` chosen by `dev up [--lan IP]`.

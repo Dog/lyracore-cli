@@ -11,8 +11,9 @@ fn main() {
     // bug — so on failure only (never on success, and never for any other command) it gets one
     // extra line pointing at `doctor`. Parsed here, ahead of `run`, so a bad-flags usage error
     // (which never reaches `dev up`'s own logic) doesn't earn the hint.
-    let is_dev_up = matches!(Command::parse(&args), Ok(Command::DevUp { .. }));
-    std::process::exit(match run(&args) {
+    let command = Command::parse(&args);
+    let is_dev_up = matches!(&command, Ok(Command::DevUp { .. }));
+    std::process::exit(match command.and_then(run) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("lyracore: {e}");
@@ -26,8 +27,7 @@ fn main() {
     });
 }
 
-fn run(args: &[String]) -> Result<i32> {
-    let command = Command::parse(args)?;
+fn run(command: Command) -> Result<i32> {
     let runner = RealProcessRunner;
     let inspector = RealProcessInspector;
     // Only ever pointed at the loopback node: minting an identity and claiming the operator as it.
@@ -36,6 +36,10 @@ fn run(args: &[String]) -> Result<i32> {
     match command {
         Command::Help => {
             println!("{}", cmd::USAGE);
+            Ok(EXIT_OK)
+        }
+        Command::HelpTopic(topic) => {
+            println!("{}", cmd::help::topic(&topic)?);
             Ok(EXIT_OK)
         }
         Command::HelpAll => {
@@ -101,9 +105,9 @@ fn run(args: &[String]) -> Result<i32> {
             })
             .map(|_| EXIT_OK)
         }
-        Command::DevLogs(component) => {
+        Command::DevLogs { component, all } => {
             let dev = cmd::dev::DevManager::new(ProjectLayout::discover()?)?;
-            dev.logs(component).map(|_| EXIT_OK)
+            dev.logs(component, all).map(|_| EXIT_OK)
         }
         Command::DevDown { forget } => {
             let mut dev = cmd::dev::DevManager::new(ProjectLayout::discover()?)?;
@@ -215,9 +219,8 @@ fn run(args: &[String]) -> Result<i32> {
                 EXIT_OK
             })
         }
-        Command::ServiceReconcile => {
-            cmd::service::reconcile(&ProjectLayout::discover()?, &runner).map(|_| EXIT_OK)
+        Command::Update { reset_mirror } => {
+            cmd::update::run(&ProjectLayout::discover()?, &runner, reset_mirror).map(|_| EXIT_OK)
         }
-        Command::Update => cmd::update::run(&ProjectLayout::discover()?, &runner).map(|_| EXIT_OK),
     }
 }

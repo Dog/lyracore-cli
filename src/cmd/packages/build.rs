@@ -1,7 +1,9 @@
 //! `lyracore packages build` — regenerate the Datascript typings, typecheck against them, then run
 //! every enabled Package's Datascripts, compile its Runtime Scripts, and validate what came out.
 //!
-//! A version gate, then up to eight steps, in this order, and the order is the contract:
+//! Inventory comes first. Empty/source-free builds skip Bun and schema generation. Runtime-script-
+//! only builds skip schema generation and Datascript typechecking. Existing artifacts still validate.
+//! With Datascripts, the version gate and subsequent steps run in this order:
 //!
 //! 0. `bun --version` must match the checkout's exact pin. A hard failure, unlike `doctor`'s Bun
 //!    check: `doctor` only reports drift on a machine that may never run Bun at all, but this
@@ -358,30 +360,40 @@ pub(crate) fn validate_script_artifacts(
     })
 }
 
-pub fn run(project: &ProjectLayout, runner: &dyn ProcessRunner) -> Result<()> {
+fn prepare_toolchain(
+    project: &ProjectLayout,
+    runner: &dyn ProcessRunner,
+    datascript_packages: &[String],
+) -> Result<()> {
     let datascripts = project.datascripts_dir();
-    let missing = ["package.json", "bun.lock", "tsconfig.json"]
-        .into_iter()
+    let required = if datascript_packages.is_empty() {
+        &["package.json", "bun.lock"][..]
+    } else {
+        &["package.json", "bun.lock", "tsconfig.json"][..]
+    };
+    let missing = required
+        .iter()
+        .copied()
         .filter(|name| !datascripts.join(name).is_file())
         .collect::<Vec<_>>();
     if !missing.is_empty() {
         return Err(Error::PrerequisiteMissing(format!(
             "the Datascript project at {} is incomplete (missing {}). `packages build` needs the \
-             checked-in Bun project before it can regenerate datascripts/generated/ and \
-             typecheck the Datascripts. Restore the missing files from this checkout's branch.",
+             checked-in Bun project to compile enabled Package sources. Restore the missing \
+             files from this checkout's branch.",
             datascripts.display(),
             missing.join(", ")
         )));
     }
 
-    script::refuse_stale_transition(project)?;
     verify_bun(runner)?;
 
-    println!(
-        "regenerating Module schema typings -> {}",
-        project.datascript_types_dir().display()
-    );
-    runner
+    if !datascript_packages.is_empty() {
+        println!(
+            "regenerating Module schema typings -> {}",
+            project.datascript_types_dir().display()
+        );
+        runner
         .run_streaming(&typegen_command(project))
         .map_err(|e| {
             Error::Process(format!(
@@ -390,6 +402,7 @@ pub fn run(project: &ProjectLayout, runner: &dyn ProcessRunner) -> Result<()> {
                  compile fails here first. Nothing was typechecked.\n  ({e})"
             ))
         })?;
+    }
     println!("installing the pinned Datascript dependencies (bun.lock)");
     runner
         .run_streaming(&install_command(project))
@@ -402,27 +415,36 @@ pub fn run(project: &ProjectLayout, runner: &dyn ProcessRunner) -> Result<()> {
             ))
         })?;
 
-    let datascript_packages = packages_with_datascripts(project)?;
-    let config = typecheck_config(project, &datascript_packages)?;
-    let mut typecheck = typecheck_command(project);
-    if let Some(config) = &config {
-        typecheck = typecheck
-            .arg("--project")
-            .arg(config.path().to_string_lossy().to_string());
-    }
-    println!("typechecking the Datascripts against the regenerated typings");
-    runner.run_streaming(&typecheck).map_err(|e| {
-        Error::Process(format!(
-            "the Datascripts do not typecheck against the current Module schema. This is the \
+    if !datascript_packages.is_empty() {
+        let config = typecheck_config(project, datascript_packages)?;
+        let mut typecheck = typecheck_command(project);
+        if let Some(config) = &config {
+            typecheck = typecheck
+                .arg("--project")
+                .arg(config.path().to_string_lossy().to_string());
+        }
+        println!("typechecking the Datascripts against the regenerated typings");
+        runner.run_streaming(&typecheck).map_err(|e| {
+            Error::Process(format!(
+                "the Datascripts do not typecheck against the current Module schema. This is the \
                  gate doing its job — the errors above name the file, line and column to fix. A \
                  column the Module renamed, retyped or removed shows up there.\n  ({e})"
-        ))
-    })?;
+            ))
+        })?;
 
-    println!();
-    println!("Datascripts typecheck against the current Module schema.");
+        println!();
+        println!("Datascripts typecheck against the current Module schema.");
+    }
+    Ok(())
+}
 
+pub fn run(project: &ProjectLayout, runner: &dyn ProcessRunner) -> Result<()> {
+    script::refuse_stale_transition(project)?;
+    let datascript_packages = packages_with_datascripts(project)?;
     let script_packages = script::packages_with_scripts(project)?;
+    if !datascript_packages.is_empty() || !script_packages.is_empty() {
+        prepare_toolchain(project, runner, &datascript_packages)?;
+    }
     for path in script::remove_artifacts_without_sources(project)? {
         println!(
             "removed source-built Script Artifact with no Runtime Script sources: {}",
@@ -433,6 +455,7 @@ pub fn run(project: &ProjectLayout, runner: &dyn ProcessRunner) -> Result<()> {
         if project.packages_dir().is_dir() {
             validate_generated_artifacts(project, runner, None)?;
         }
+        println!("no enabled Package sources to build.");
         return Ok(());
     }
 
@@ -544,16 +567,31 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_inventory_needs_no_toolchain_or_datascript_project() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        let project = ProjectLayout::from_root(tmp.path()).unwrap();
+        let stack = FakeStack::new()
+            .fail_on("bun", "unavailable")
+            .fail_on("spacetime", "unavailable");
+        run(&project, &stack.runner()).unwrap();
+        assert!(stack.rendered().is_empty());
+    }
+
+    #[test]
     fn a_build_verifies_bun_generates_typings_installs_the_lockfile_then_typechecks_in_that_order()
     {
         let tmp = TempDir::new().unwrap();
         let project = checkout(&tmp);
+        with_datascript(&project, "example", "main");
+        with_base_snapshot(&project);
+        with_generated_artifact(&project, "example");
         let stack = FakeStack::new();
 
         run(&project, &stack.runner()).unwrap();
 
         let calls = stack.rendered();
-        assert_eq!(calls.len(), 4, "{calls:?}");
+        assert_eq!(calls.len(), 6, "{calls:?}");
         assert!(calls[0].starts_with("bun --version"), "{calls:?}");
         assert!(calls[1].contains("spacetime generate"), "{calls:?}");
         assert!(calls[1].contains("--lang typescript"), "{calls:?}");
@@ -604,6 +642,9 @@ mod tests {
     fn a_failed_typegen_stops_before_anything_is_typechecked() {
         let tmp = TempDir::new().unwrap();
         let project = checkout(&tmp);
+        with_datascript(&project, "example", "main");
+        with_base_snapshot(&project);
+        with_generated_artifact(&project, "example");
         let stack = FakeStack::new().fail_on("spacetime generate", "the module does not compile");
 
         let error = run(&project, &stack.runner()).unwrap_err();
@@ -618,6 +659,9 @@ mod tests {
     fn a_lockfile_that_no_longer_matches_package_json_fails_with_the_fix() {
         let tmp = TempDir::new().unwrap();
         let project = checkout(&tmp);
+        with_datascript(&project, "example", "main");
+        with_base_snapshot(&project);
+        with_generated_artifact(&project, "example");
         let stack = FakeStack::new().fail_on("bun install", "lockfile had changes");
 
         let error = run(&project, &stack.runner()).unwrap_err();
@@ -638,6 +682,9 @@ mod tests {
         // step streams — so the error here supplies the reading, not a copy of the transcript.
         let tmp = TempDir::new().unwrap();
         let project = checkout(&tmp);
+        with_datascript(&project, "example", "main");
+        with_base_snapshot(&project);
+        with_generated_artifact(&project, "example");
         let stack = FakeStack::new().fail_on("tsc", "exit status 1");
 
         let error = run(&project, &stack.runner()).unwrap_err();
@@ -653,6 +700,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
         let project = ProjectLayout::from_root(&root).unwrap();
+        with_datascript(&project, "example", "main");
         let stack = FakeStack::new();
 
         let error = run(&project, &stack.runner()).unwrap_err();
@@ -668,6 +716,9 @@ mod tests {
     fn every_required_datascript_project_file_is_checked_before_typegen() {
         let tmp = TempDir::new().unwrap();
         let project = checkout(&tmp);
+        with_datascript(&project, "example", "main");
+        with_base_snapshot(&project);
+        with_generated_artifact(&project, "example");
         std::fs::remove_file(project.datascripts_dir().join("tsconfig.json")).unwrap();
         let stack = FakeStack::new();
 
@@ -683,6 +734,9 @@ mod tests {
     fn a_missing_bun_fails_before_anything_is_generated_or_installed() {
         let tmp = TempDir::new().unwrap();
         let project = checkout(&tmp);
+        with_datascript(&project, "example", "main");
+        with_base_snapshot(&project);
+        with_generated_artifact(&project, "example");
         let stack = FakeStack::new().fail_on("bun --version", "command not found");
 
         let error = run(&project, &stack.runner()).unwrap_err();
@@ -696,6 +750,9 @@ mod tests {
     fn a_bun_older_than_the_pin_fails_the_build() {
         let tmp = TempDir::new().unwrap();
         let project = checkout(&tmp);
+        with_datascript(&project, "example", "main");
+        with_base_snapshot(&project);
+        with_generated_artifact(&project, "example");
         let stack = FakeStack::new().with_stdout("bun --version", "1.3.6");
 
         let error = run(&project, &stack.runner()).unwrap_err();
@@ -711,6 +768,9 @@ mod tests {
         // The pin is exact, not a floor: a Datascript's typecheck is only verified against 1.3.7.
         let tmp = TempDir::new().unwrap();
         let project = checkout(&tmp);
+        with_datascript(&project, "example", "main");
+        with_base_snapshot(&project);
+        with_generated_artifact(&project, "example");
         let stack = FakeStack::new().with_stdout("bun --version", "1.4.0");
 
         let error = run(&project, &stack.runner()).unwrap_err();
@@ -722,6 +782,9 @@ mod tests {
     fn a_malformed_bun_banner_fails_the_build_rather_than_guessing() {
         let tmp = TempDir::new().unwrap();
         let project = checkout(&tmp);
+        with_datascript(&project, "example", "main");
+        with_base_snapshot(&project);
+        with_generated_artifact(&project, "example");
         let stack = FakeStack::new().with_stdout("bun --version", "bun 1.3.7");
 
         let error = run(&project, &stack.runner()).unwrap_err();
@@ -737,6 +800,9 @@ mod tests {
     fn the_pinned_bun_lets_the_build_proceed() {
         let tmp = TempDir::new().unwrap();
         let project = checkout(&tmp);
+        with_datascript(&project, "example", "main");
+        with_base_snapshot(&project);
+        with_generated_artifact(&project, "example");
         let stack = FakeStack::new().with_stdout("bun --version", "1.3.7");
 
         run(&project, &stack.runner()).unwrap();
@@ -1015,13 +1081,16 @@ mod tests {
         run(&project, &stack.runner()).unwrap();
 
         let calls = stack.rendered();
-        assert_eq!(calls.len(), 7, "{calls:?}");
-        assert!(calls[4].contains("--print-events"), "{calls:?}");
-        assert!(calls[5].contains("build-scripts.ts"), "{calls:?}");
-        assert!(calls[5].ends_with("fire_nova"), "{calls:?}");
-        assert!(calls[6].contains("lyracore-delta-check"), "{calls:?}");
+        assert!(!calls
+            .iter()
+            .any(|call| call.contains("spacetime generate") || call.contains("tsc")));
+        assert_eq!(calls.len(), 5, "{calls:?}");
+        assert!(calls[2].contains("--print-events"), "{calls:?}");
+        assert!(calls[3].contains("build-scripts.ts"), "{calls:?}");
+        assert!(calls[3].ends_with("fire_nova"), "{calls:?}");
+        assert!(calls[4].contains("lyracore-delta-check"), "{calls:?}");
         assert!(
-            calls[6].contains("fire_nova/data/.generated/fire_nova.script.json"),
+            calls[4].contains("fire_nova/data/.generated/fire_nova.script.json"),
             "{calls:?}"
         );
     }
@@ -1084,7 +1153,9 @@ mod tests {
             ),
         )
         .unwrap();
-        let stack = FakeStack::new();
+        let stack = FakeStack::new()
+            .fail_on("bun", "unavailable")
+            .fail_on("spacetime", "unavailable");
 
         run(&project, &stack.runner()).unwrap();
         super::super::check::run(&project, &stack.runner()).unwrap();
@@ -1127,11 +1198,7 @@ mod tests {
         run(&project, &stack.runner()).unwrap();
 
         let calls = stack.rendered();
-        assert_eq!(calls.len(), 4, "{calls:?}");
-        for call in &calls {
-            assert!(!call.contains("bun run"), "{calls:?}");
-            assert!(!call.contains("lyracore-delta-check"), "{calls:?}");
-        }
+        assert!(calls.is_empty(), "{calls:?}");
     }
 
     #[test]

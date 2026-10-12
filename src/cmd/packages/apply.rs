@@ -331,6 +331,8 @@ pub fn run(
     }
     databases(&shards)?;
     check::prepare(project, runner, prompt, options.client_data.as_deref())?;
+    // Disabled Rust may still be deployed if it was disabled without a running local stack.
+    // Its removal needs a publish even when the target has no pending teardown record.
     let has_rust = inventory(project)?
         .iter()
         .any(|package| package.dir.join("src/mod.rs").is_file());
@@ -2169,6 +2171,35 @@ mod tests {
         assert_eq!(writes.len(), 4, "{writes:?}");
         assert!(writes[0].ends_with("one") && writes[1].contains("one debug_repair_after_publish"));
         assert!(writes[2].ends_with("two") && writes[3].contains("two debug_repair_after_publish"));
+    }
+
+    #[test]
+    fn disabled_rust_without_pending_teardown_publishes_its_removal() {
+        let checkout = Checkout::new();
+        checkout.with_rust();
+        super::super::lifecycle::tests::disable_without_stack(&checkout.project, "greeter")
+            .unwrap();
+        let stack = FakeStack::new();
+        run(
+            &checkout.project,
+            &stack.runner(),
+            &ScriptedPrompt::new(&[]),
+            &checkout.options_without_client_data(&["one"]),
+        )
+        .unwrap();
+        let calls = stack.rendered();
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.starts_with("spacetime publish")),
+            "{calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.contains("debug_repair_after_publish")),
+            "{calls:?}"
+        );
     }
 
     #[test]

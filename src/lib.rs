@@ -9,6 +9,7 @@ pub mod config;
 pub mod error;
 pub mod harness;
 pub mod http;
+pub mod ops;
 pub mod proc;
 pub mod project;
 pub mod rls;

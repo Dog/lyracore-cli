@@ -15,7 +15,7 @@
 //! `update` therefore advances a RECORDED commit rather than a working copy: the stamp says which
 //! repository and which commit the installed tree came from, and the update replaces the whole
 //! folder with the repository's current one. The old folder is kept until the new revision is
-//! installed and preflight is green, so every failure is recoverable.
+//! installed and the applicable checks pass, so every failure is recoverable.
 //!
 //! Neither verb publishes anything or synchronizes a client.
 
@@ -27,7 +27,6 @@ use super::{
     Origin, PackageName, PackageState,
 };
 use crate::cmd::import::Prompt;
-use crate::cmd::preflight;
 use crate::proc::{CommandSpec, ProcessRunner};
 use crate::project::ProjectLayout;
 use crate::{Error, Result};
@@ -293,7 +292,7 @@ pub fn update(
                     println!();
                     println!(
                         "stopping at '{}'. The {advanced} Package(s) updated before it are \
-                         installed and preflighted; they are not rolled back.",
+                         installed; they are not rolled back.",
                         package.name.as_str()
                     );
                 }
@@ -387,6 +386,8 @@ fn update_one(
 
     let origin = source.origin(clone.revision());
     let compiled_in = package.state == PackageState::Enabled;
+    let server_changed = super::affects_server(project, &package.dir)
+        || super::affects_server(project, &candidate_path);
     let preserved = PreservedPackage::move_aside(project, package)?;
     let installed = install_tree(
         project,
@@ -406,13 +407,11 @@ fn update_one(
         println!("  identity  {identity}");
         println!();
         if compiled_in {
-            println!("running preflight with the new revision compiled in");
+            super::validate_install(project, runner, server_changed)
         } else {
-            println!(
-                "running preflight ('{name}' is disabled, so the module does not compile it in)"
-            );
+            println!("'{name}' is disabled; validation for activation runs after enabling it.");
+            Ok(())
         }
-        preflight::run(project, runner)
     });
     if let Err(cause) = outcome {
         return Err(preserved.restore(
@@ -426,10 +425,7 @@ fn update_one(
     preserved.discard();
 
     println!();
-    println!(
-        "'{name}' is at {} and preflight is green.",
-        short(clone.revision())
-    );
+    println!("'{name}' is at {}.", short(clone.revision()));
     if !compiled_in {
         println!("  lyracore packages enable {name}");
     }
@@ -588,7 +584,7 @@ fn refuse_dirty(package: &InstalledPackage, recorded: &ProvenanceStamp) -> Resul
 }
 
 /// The Package as it was before an update, moved out of its inventory but kept on disk until the
-/// new revision is installed AND preflight is green.
+/// new revision is installed AND the applicable checks pass.
 ///
 /// The failure that matters during an update is the one that happens with the old folder already
 /// gone. Keeping it makes every one of them recoverable: the old revision goes back where it was,
@@ -1101,6 +1097,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn changing_a_rust_package_to_client_only_still_validates_and_rolls_back() {
+        let tmp = TempDir::new().unwrap();
+        let project = checkout(&tmp);
+        let tree = candidate(&tmp, "anything");
+        install(&project, &repository(&tree, FIRST));
+        std::fs::remove_dir_all(tree.join("src")).unwrap();
+        std::fs::create_dir_all(tree.join("client")).unwrap();
+        let stack = repository(&tree, SECOND)
+            .fail_on("cargo check", "module still references removed Rust");
+        assert!(update(
+            &project,
+            &stack.runner(),
+            &Answer("yes"),
+            Some("greeter"),
+            true
+        )
+        .is_err());
+        let installed = project.packages_dir().join("greeter");
+        assert!(installed.join("src/mod.rs").is_file());
+        assert_eq!(ProvenanceStamp::read(&installed).unwrap().revision, FIRST);
+    }
+
+    #[test]
+    fn an_enabled_client_only_update_needs_no_module_toolchain() {
+        let tmp = TempDir::new().unwrap();
+        let project = checkout(&tmp);
+        let tree = candidate(&tmp, "anything");
+        std::fs::remove_dir_all(tree.join("src")).unwrap();
+        std::fs::create_dir_all(tree.join("client")).unwrap();
+        std::fs::write(tree.join("client/README"), "v1").unwrap();
+        install(&project, &repository(&tree, FIRST));
+        std::fs::write(tree.join("client/README"), "v2").unwrap();
+        let stack = repository(&tree, SECOND)
+            .fail_on("cargo", "unavailable")
+            .fail_on("spacetime", "unavailable");
+        update(
+            &project,
+            &stack.runner(),
+            &Answer("yes"),
+            Some("greeter"),
+            true,
+        )
+        .unwrap();
+        let installed = project.packages_dir().join("greeter");
+        assert_eq!(
+            std::fs::read_to_string(installed.join("client/README")).unwrap(),
+            "v2"
+        );
+        assert_eq!(ProvenanceStamp::read(&installed).unwrap().revision, SECOND);
+    }
+
     // ---- which Packages `update` will act on ----
 
     #[test]
@@ -1214,7 +1262,9 @@ mod tests {
         super::super::lifecycle::tests::disable_without_stack(&project, "greeter").unwrap();
 
         std::fs::write(tree.join("src/mod.rs"), "pub fn greet_v2() {}\n").unwrap();
-        let stack = repository(&tree, SECOND);
+        let stack = repository(&tree, SECOND)
+            .fail_on("cargo", "compiler unavailable")
+            .fail_on("spacetime", "unavailable");
         update(&project, &stack.runner(), &Answer("yes"), None, true).unwrap();
 
         let disabled = project.packages_disabled_dir().join("greeter");

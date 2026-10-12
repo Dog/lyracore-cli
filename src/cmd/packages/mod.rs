@@ -251,8 +251,7 @@ pub fn check_collision(project: &ProjectLayout, name: &PackageName) -> Result<()
 /// Refuse a destination `packages/<name>` that Git already tracks in the core checkout: a
 /// first-party Package like the Reference Package (`example`) or an in-tree instance Package
 /// (`fire_nova`). Installing over one would overwrite tracked content outside any Package
-/// Inventory move, dirtying the checkout. `lyracore update` and `service reconcile` then refuse to
-/// run against a dirty tree.
+/// Inventory move, dirtying the checkout and blocking `lyracore update`.
 fn check_not_tracked(
     project: &ProjectLayout,
     runner: &dyn ProcessRunner,
@@ -272,8 +271,7 @@ fn check_not_tracked(
     }
     Err(Error::Usage(format!(
         "cannot install '{}' from {}: {} is already tracked by Git in this checkout. Installing \
-         over a tracked Package would dirty the checkout, and `lyracore update` and `service \
-         reconcile` then refuse to run. Nothing was copied.",
+         over a tracked Package would dirty the checkout, and `lyracore update` then refuses to run. Nothing was copied.",
         name.as_str(),
         source,
         project.root.join(&relative).display()
@@ -464,6 +462,30 @@ impl Origin<'_> {
     }
 }
 
+/// Whether this tree contributes server content or enables a legacy Datascript.
+pub(crate) fn affects_server(project: &ProjectLayout, dir: &Path) -> bool {
+    ["src", "data", "scripts", "datascripts"]
+        .iter()
+        .any(|name| dir.join(name).is_dir())
+        || dir
+            .file_name()
+            .is_some_and(|name| project.datascripts_src_dir().join(name).is_dir())
+}
+
+/// Only server-content changes need the deploy gate. Client packing owns client validation.
+pub(crate) fn validate_install(
+    project: &ProjectLayout,
+    runner: &dyn ProcessRunner,
+    server_changed: bool,
+) -> Result<()> {
+    if server_changed {
+        preflight::run(project, runner)
+    } else {
+        println!("client-only content: module preflight is not needed; client sync/pack validates the client artifact.");
+        Ok(())
+    }
+}
+
 /// The installation contract, from the first refusal to the printed next steps.
 ///
 /// Order matters and is the whole design: everything that can refuse the install does so BEFORE
@@ -525,8 +547,7 @@ pub(crate) fn install(
     println!("  identity  {identity}");
 
     println!();
-    println!("running preflight with the Package compiled in");
-    preflight::run(project, runner).map_err(|e| {
+    validate_install(project, runner, affects_server(project, &destination)).map_err(|e| {
         Error::Process(format!(
             "preflight failed with '{}' installed, so it has NOT been published and the module on \
              the node is unchanged.\n  The Package is on disk at {}. Fix it there and re-run \
@@ -538,7 +559,7 @@ pub(crate) fn install(
     })?;
 
     println!();
-    println!("'{}' is installed and preflight is green.", name.as_str());
+    println!("'{}' is installed.", name.as_str());
     print!("{}", activation_steps(&destination));
     Ok(())
 }
@@ -841,7 +862,7 @@ pub fn new(
     println!("  revision  {}", collection.revision());
     println!("  identity  {identity}");
 
-    preflight::run(project, runner).map_err(|e| {
+    validate_install(project, runner, affects_server(project, &destination)).map_err(|e| {
         Error::Process(format!(
             "preflight failed after '{}' was scaffolded. Nothing was published.\n  The Package \
              remains at {}. Fix the reported cause and re-run `lyracore preflight`, or remove \
@@ -852,7 +873,7 @@ pub fn new(
         ))
     })?;
 
-    println!("'{}' is scaffolded and preflight is green.", name.as_str());
+    println!("'{}' is scaffolded.", name.as_str());
     print!("{next_steps}");
     Ok(())
 }
@@ -1251,6 +1272,30 @@ pub(super) mod tests {
     }
 
     // ---- the shape contract ----
+
+    #[test]
+    fn installing_client_only_content_does_not_compile_the_module() {
+        let tmp = TempDir::new().unwrap();
+        let project = checkout(&tmp);
+        let source = tmp.path().join("ui");
+        std::fs::create_dir_all(source.join("client/addons/UI")).unwrap();
+        let stack = FakeStack::new()
+            .fail_on("cargo", "compiler unavailable")
+            .fail_on("spacetime", "unavailable");
+        add(
+            &project,
+            &stack.runner(),
+            &Answer("yes"),
+            source.to_str().unwrap(),
+            true,
+        )
+        .unwrap();
+        assert!(project.packages_dir().join("ui/client/addons/UI").is_dir());
+        assert!(!stack
+            .rendered()
+            .iter()
+            .any(|call| call.starts_with("cargo ") || call.starts_with("spacetime ")));
+    }
 
     #[test]
     fn a_client_only_package_is_valid_and_a_src_without_mod_rs_is_not() {

@@ -1,26 +1,6 @@
-//! `lyracore service reconcile` — make this host's standalone supervisor match the tracked unit.
-//!
-//! The server repository's `docs/danger-zones.md` §3 installs
-//! `deploy/systemd/spacetimedb-standalone.service` by hand: `install`, `systemctl daemon-reload`,
-//! `systemctl enable`, restart, then read the effective properties back. A host reconciled by hand
-//! matches whatever its last operator typed; this encodes the same ordered steps so it matches the
-//! artifact in the checkout instead.
-//!
-//! Deployment reconciliation is ONE job, so this verb owns the git steps too: it moves the
-//! checkout to `origin/main` (the same work `update` does, shared with it) and then reconciles the
-//! host against what that checkout now ships. It is a separate verb from `update` because it is a
-//! root-only host mutator, and `update` is a contributor's git-pull replacement.
-//!
-//! Two rules shape everything below. Every step goes through [`ProcessRunner`], so the whole plan
-//! is an ordered, assertable list of commands rather than side effects on a machine. And the
-//! service contract it verifies — start command, descriptor limit, stderr destination, data
-//! directory, listen address — is READ OUT of the tracked unit, never duplicated here, so this CLI
-//! cannot claim a host is reconciled against a contract the checkout no longer ships.
-//!
-//! It manages the supervisor only. The persistent database directory is checked for existence and
-//! otherwise never touched: no create, no move, no delete.
+//! Host-only reconciliation of the Standalone Supervisor from the selected Core checkout.
+//! Invoked by `lyracore-ops service reconcile`. It neither updates source nor publishes modules.
 
-use crate::cmd::update;
 use crate::proc::{CommandSpec, ProcessRunner};
 use crate::project::ProjectLayout;
 use crate::{Error, Result};
@@ -30,40 +10,20 @@ use crate::{Error, Result};
 /// the same name.
 const SYSTEMD_UNIT_DIR: &str = "/etc/systemd/system";
 
-/// Update the checkout, install the tracked unit, reload systemd, enable it, restart it, and
-/// verify the result.
-///
-/// Refuses — before the HOST is touched — when the invocation is not root, when the checkout has
-/// local work a reset would discard, when a host prerequisite is missing, or when another active
-/// service already owns the node's data directory or listen address.
-///
-/// "Before the host is touched" and not "before anything": the checkout reset below runs first, on
-/// purpose. The unit and the contract to check the host against are read out of the UPDATED
-/// checkout, so checking the host before the reset would check it against a contract this command
-/// is not about to install. A refusal after that point therefore leaves the checkout on
-/// `origin/main` with the host untouched, which is the state an operator can simply re-run from.
+/// Install the unit from the selected checkout and verify the restarted supervisor.
+/// Updating source is a separate, unprivileged operation.
 pub fn reconcile(project: &ProjectLayout, runner: &dyn ProcessRunner) -> Result<()> {
-    // Fail fast, before the network and before anything on disk moves: this plan resets the
-    // checkout and then writes to /etc, and a half-done privileged plan is worse than one that
-    // never started.
     require_root(runner)?;
-    // Deployment drift is independent of git drift: a host can sit exactly on origin/main with the
-    // wrong unit installed, or none at all. So the reconciliation below runs either way.
-    update::pull(project, runner)?;
     reconcile_unit(project, runner)
 }
 
-/// `service reconcile` writes to `/etc/systemd/system` and drives `systemctl`. Asking for the
-/// privilege up front, rather than per command, keeps the plan one atomic decision: no mid-run
-/// password prompt, and no half-installed unit because the fifth command was the first to be
-/// denied.
 fn require_root(runner: &dyn ProcessRunner) -> Result<()> {
     let euid = runner.run_and_wait(&CommandSpec::new("id").arg("-u"))?;
     match euid.trim().parse::<u32>() {
         Ok(0) => Ok(()),
         Ok(other) => Err(Error::Process(format!(
             "`service reconcile` installs a systemd unit and restarts the standalone node, which \
-             needs root — this process runs as uid {other}. Re-run it as `sudo ./lyracore service \
+             needs root — this process runs as uid {other}. Re-run it as `sudo lyracore-ops service \
              reconcile`."
         ))),
         Err(_) => Err(Error::Process(format!(
@@ -701,7 +661,6 @@ fn effective_exec_start(property: &str) -> std::result::Result<ExecCommand, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::update::testing::{ahead_stack, same_sha_stack};
     use crate::proc::fake::FakeStack;
     use tempfile::TempDir;
 
@@ -803,17 +762,6 @@ WantedBy=multi-user.target
             .with_stdout("stat --dereference", "2049:7654\n2049:7654\n")
     }
 
-    /// The git half of the plan, as `update` runs it: fetch, the dirty-tree check, and the two
-    /// revisions it compares.
-    fn git_steps() -> Vec<String> {
-        vec![
-            "git fetch origin".to_string(),
-            "git status --porcelain".to_string(),
-            "git rev-parse HEAD".to_string(),
-            "git rev-parse origin/main".to_string(),
-        ]
-    }
-
     // ---- what the tracked unit says ----
 
     #[test]
@@ -907,36 +855,14 @@ ExecStart=/usr/bin/standalone start
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
         let project = ProjectLayout::from_root(tmp.path()).unwrap();
-        let stack = reconcilable_host(same_sha_stack());
+        let stack = reconcilable_host(FakeStack::new());
 
         let error = reconcile(&project, &stack.runner())
             .unwrap_err()
             .to_string();
 
         assert!(error.contains(ProjectLayout::STANDALONE_UNIT), "{error}");
-        let mut expected = vec!["id -u".to_string()];
-        expected.extend(git_steps());
-        assert_eq!(stack.rendered(), expected);
-    }
-
-    /// The same refusal from a checkout that was BEHIND `origin/main`, which is the case that
-    /// shows the real ordering: the reset lands first, deliberately, because the unit to install
-    /// is read out of the UPDATED checkout. The host is still untouched afterwards.
-    #[test]
-    fn the_reset_lands_before_the_unit_is_read_and_leaves_the_host_untouched() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
-        let project = ProjectLayout::from_root(tmp.path()).unwrap();
-        let stack = reconcilable_host(ahead_stack());
-
-        let error = reconcile(&project, &stack.runner())
-            .unwrap_err()
-            .to_string();
-
-        assert!(error.contains(ProjectLayout::STANDALONE_UNIT), "{error}");
-        let mut expected = vec!["id -u".to_string()];
-        expected.extend(git_steps());
-        expected.push("git reset --hard origin/main".to_string());
+        let expected = vec!["id -u".to_string()];
         assert_eq!(stack.rendered(), expected);
     }
 
@@ -946,20 +872,20 @@ ExecStart=/usr/bin/standalone start
     fn a_non_root_invocation_is_refused_before_anything_else_runs() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack()).with_stdout("id -u", "1000\n");
+        let stack = reconcilable_host(FakeStack::new()).with_stdout("id -u", "1000\n");
 
         let error = reconcile(&project, &stack.runner())
             .unwrap_err()
             .to_string();
 
         assert!(
-            error.contains("sudo ./lyracore service reconcile"),
+            error.contains("sudo lyracore-ops service reconcile"),
             "{error}"
         );
         assert_eq!(
             stack.rendered(),
             vec!["id -u".to_string()],
-            "not even the fetch may run without the privilege the plan needs"
+            "no host operation may run without the privilege the plan needs"
         );
     }
 
@@ -967,7 +893,7 @@ ExecStart=/usr/bin/standalone start
     fn an_unreadable_user_id_is_refused_rather_than_assumed_to_be_root() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack()).with_stdout("id -u", "nobody\n");
+        let stack = reconcilable_host(FakeStack::new()).with_stdout("id -u", "nobody\n");
 
         let error = reconcile(&project, &stack.runner())
             .unwrap_err()
@@ -977,50 +903,13 @@ ExecStart=/usr/bin/standalone start
         assert_eq!(stack.rendered(), vec!["id -u".to_string()]);
     }
 
-    // ---- the git half ----
-
     #[test]
-    fn a_dirty_tree_blocks_the_service_change_too() {
+    fn reconciliation_never_reads_or_mutates_git() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack())
-            .with_stdout("status --porcelain", " M module/src/foo.rs\n");
-
-        let error = reconcile(&project, &stack.runner())
-            .unwrap_err()
-            .to_string();
-
-        assert!(error.contains("commit or stash"), "{error}");
-        assert_eq!(
-            stack.rendered(),
-            vec![
-                "id -u".to_string(),
-                "git fetch origin".to_string(),
-                "git status --porcelain".to_string(),
-            ],
-            "a dirty tree stops the reset AND the systemd mutation"
-        );
-    }
-
-    #[test]
-    fn an_already_current_checkout_still_reconciles_the_supervisor() {
-        let tmp = TempDir::new().unwrap();
-        let project = project(&tmp);
-        let stack = reconcilable_host(same_sha_stack());
-
+        let stack = reconcilable_host(FakeStack::new()).fail_on("git", "git is unavailable");
         reconcile(&project, &stack.runner()).unwrap();
-
-        let rendered = stack.rendered();
-        assert!(
-            !rendered.iter().any(|r| r.contains("reset --hard")),
-            "{rendered:?}"
-        );
-        assert!(
-            rendered
-                .iter()
-                .any(|r| r == "systemctl --no-pager restart spacetimedb-standalone.service"),
-            "deployment drift is repaired without a new commit: {rendered:?}"
-        );
+        assert!(!stack.rendered().iter().any(|call| call.starts_with("git ")));
     }
 
     // ---- the happy path ----
@@ -1029,14 +918,12 @@ ExecStart=/usr/bin/standalone start
     fn reconciliation_runs_the_runbook_steps_in_order() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack());
+        let stack = reconcilable_host(FakeStack::new());
 
         reconcile(&project, &stack.runner()).unwrap();
 
         let mut expected = vec!["id -u".to_string()];
-        expected.extend(git_steps());
         expected.extend([
-            "git reset --hard origin/main".to_string(),
             "busctl --json=short --version".to_string(),
             "id lyracore".to_string(),
             "test -x /opt/lyracore/spacetimedb/spacetimedb-standalone".to_string(),
@@ -1073,7 +960,7 @@ ExecStart=/usr/bin/standalone start
     fn the_persistent_data_directory_is_only_ever_read() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack());
+        let stack = reconcilable_host(FakeStack::new());
 
         reconcile(&project, &stack.runner()).unwrap();
 
@@ -1110,7 +997,7 @@ ExecStart=/usr/bin/standalone start
     fn missing_busctl_json_support_is_refused_before_mutation() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack())
+        let stack = reconcilable_host(FakeStack::new())
             .fail_on("busctl --json=short --version", "unknown option --json");
 
         let error = reconcile(&project, &stack.runner())
@@ -1124,7 +1011,7 @@ ExecStart=/usr/bin/standalone start
     fn a_missing_service_account_is_refused() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack()).fail_on("id lyracore", "no such user");
+        let stack = reconcilable_host(FakeStack::new()).fail_on("id lyracore", "no such user");
 
         let error = reconcile(&project, &stack.runner())
             .unwrap_err()
@@ -1137,7 +1024,7 @@ ExecStart=/usr/bin/standalone start
     fn a_missing_standalone_binary_is_refused() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack()).fail_on("test -x", "not executable");
+        let stack = reconcilable_host(FakeStack::new()).fail_on("test -x", "not executable");
 
         let error = reconcile(&project, &stack.runner())
             .unwrap_err()
@@ -1154,7 +1041,7 @@ ExecStart=/usr/bin/standalone start
     fn a_missing_data_directory_is_refused_and_never_created() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack())
+        let stack = reconcilable_host(FakeStack::new())
             .fail_on("test -d /var/lib/lyracore/spacetimedb", "no such directory");
 
         let error = reconcile(&project, &stack.runner())
@@ -1169,7 +1056,7 @@ ExecStart=/usr/bin/standalone start
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
         let stack =
-            reconcilable_host(ahead_stack()).fail_on("test -d /var/log/lyracore", "no such dir");
+            reconcilable_host(FakeStack::new()).fail_on("test -d /var/log/lyracore", "no such dir");
 
         let error = reconcile(&project, &stack.runner())
             .unwrap_err()
@@ -1184,7 +1071,7 @@ ExecStart=/usr/bin/standalone start
     fn an_active_service_owning_the_data_directory_is_named_and_refused() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack())
+        let stack = reconcilable_host(FakeStack::new())
             .with_stdout(
                 "list-units",
                 "spacetimedb.service loaded active running node\n",
@@ -1213,7 +1100,7 @@ ExecStart=/usr/bin/standalone start
     fn an_active_service_owning_the_listen_address_is_named_and_refused() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack())
+        let stack = reconcilable_host(FakeStack::new())
             .with_stdout(
                 "list-units",
                 "stdb-old.service loaded active running node\n",
@@ -1243,7 +1130,7 @@ ExecStart=/usr/bin/standalone start
             &continued_exec,
         );
         std::fs::write(project.standalone_unit(), continued).unwrap();
-        let stack = reconcilable_host(ahead_stack())
+        let stack = reconcilable_host(FakeStack::new())
             .with_stdout(
                 "list-units",
                 "stdb-old.service loaded active running node\n",
@@ -1267,7 +1154,7 @@ ExecStart=/usr/bin/standalone start
     fn an_unrelated_active_service_does_not_block_reconciliation() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack());
+        let stack = reconcilable_host(FakeStack::new());
 
         reconcile(&project, &stack.runner()).unwrap();
 
@@ -1287,7 +1174,7 @@ ExecStart=/usr/bin/standalone start
     fn a_failed_restart_stops_with_the_log_pointers_and_never_verifies() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack())
+        let stack = reconcilable_host(FakeStack::new())
             .fail_on("restart spacetimedb-standalone", "Job failed");
 
         let error = reconcile(&project, &stack.runner())
@@ -1316,7 +1203,7 @@ ExecStart=/usr/bin/standalone start
     fn an_inactive_unit_after_restart_is_reported_as_unreconciled() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack()).with_stdout(
+        let stack = reconcilable_host(FakeStack::new()).with_stdout(
             "--property=ActiveState",
             &effective_properties("failed", "", "524288", TRACKED_STDERR),
         );
@@ -1333,7 +1220,7 @@ ExecStart=/usr/bin/standalone start
     fn an_unreadable_typed_command_is_reported_as_unreconciled() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack()).fail_on(
+        let stack = reconcilable_host(FakeStack::new()).fail_on(
             "busctl --json=short get-property",
             "D-Bus property read failed",
         );
@@ -1351,7 +1238,7 @@ ExecStart=/usr/bin/standalone start
     fn an_effective_command_changed_by_a_drop_in_is_reported_as_unreconciled() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack())
+        let stack = reconcilable_host(FakeStack::new())
             .with_stdout(
                 "--property=ActiveState",
                 &effective_properties(
@@ -1393,7 +1280,7 @@ ExecStart=/usr/bin/standalone start
     fn an_effective_executable_path_drift_is_reported_even_when_argv_matches() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack())
+        let stack = reconcilable_host(FakeStack::new())
             .with_stdout(
                 "--property=ActiveState",
                 &effective_properties(
@@ -1423,7 +1310,7 @@ ExecStart=/usr/bin/standalone start
     fn effective_argument_boundaries_are_compared_without_flattening() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack())
+        let stack = reconcilable_host(FakeStack::new())
             .with_stdout(
                 "--property=ActiveState",
                 &effective_properties(
@@ -1462,7 +1349,7 @@ ExecStart=/usr/bin/standalone start
     fn multiple_effective_start_commands_are_reported_as_unreconciled() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack())
+        let stack = reconcilable_host(FakeStack::new())
             .with_stdout(
                 "--property=ActiveState",
                 &effective_properties(
@@ -1500,7 +1387,7 @@ ExecStart=/usr/bin/standalone start
     fn the_inherited_1024_descriptor_ceiling_is_reported_as_unreconciled() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack()).with_stdout(
+        let stack = reconcilable_host(FakeStack::new()).with_stdout(
             "--property=ActiveState",
             &effective_properties("active", "", "1024", TRACKED_STDERR),
         );
@@ -1519,7 +1406,7 @@ ExecStart=/usr/bin/standalone start
     fn systemd_append_mode_with_the_tracked_open_file_is_reconciled() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack())
+        let stack = reconcilable_host(FakeStack::new())
             .with_stdout(
                 "--property=ActiveState",
                 "ActiveState=active\nDropInPaths=\nLimitNOFILE=524288\nStandardError=append\nMainPID=1234\n",
@@ -1542,7 +1429,7 @@ ExecStart=/usr/bin/standalone start
             let tmp = TempDir::new().unwrap();
             let project = project(&tmp);
             let stack =
-                reconcilable_host(ahead_stack()).with_stdout("stat --dereference", identities);
+                reconcilable_host(FakeStack::new()).with_stdout("stat --dereference", identities);
 
             let error = reconcile(&project, &stack.runner())
                 .unwrap_err()
@@ -1561,7 +1448,7 @@ ExecStart=/usr/bin/standalone start
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
         let stack =
-            reconcilable_host(ahead_stack()).fail_on("stat --dereference", "Permission denied");
+            reconcilable_host(FakeStack::new()).fail_on("stat --dereference", "Permission denied");
 
         let error = reconcile(&project, &stack.runner())
             .unwrap_err()
@@ -1585,7 +1472,7 @@ ExecStart=/usr/bin/standalone start
         ] {
             let tmp = TempDir::new().unwrap();
             let project = project(&tmp);
-            let stack = reconcilable_host(ahead_stack()).with_stdout(
+            let stack = reconcilable_host(FakeStack::new()).with_stdout(
                 "--property=ActiveState",
                 &format!(
                     "ActiveState=active\nLimitNOFILE=524288\nStandardError=append\n{pid_property}"
@@ -1612,7 +1499,7 @@ ExecStart=/usr/bin/standalone start
     fn a_stderr_destination_that_keeps_no_evidence_is_reported_as_unreconciled() {
         let tmp = TempDir::new().unwrap();
         let project = project(&tmp);
-        let stack = reconcilable_host(ahead_stack()).with_stdout(
+        let stack = reconcilable_host(FakeStack::new()).with_stdout(
             "--property=ActiveState",
             &effective_properties("active", "", "524288", "inherit"),
         );

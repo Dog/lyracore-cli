@@ -5,6 +5,7 @@
 [package]
 name = "lyracore-cli"
 version = "0.1.0"
+default-run = "lyracore"
 edition = "2021"
 # 1.85 is a floor the LOCKED dependency graph sets, not this crate's own code: several
 # transitive crates declare `edition = "2024"`, which Cargo needs 1.85 just to parse. (The
@@ -18,6 +19,10 @@ publish = false
 [[bin]]
 name = "lyracore"
 path = "src/bin/main.rs"
+
+[[bin]]
+name = "lyracore-ops"
+path = "src/bin/ops.rs"
 
 [dependencies]
 thiserror = "1"

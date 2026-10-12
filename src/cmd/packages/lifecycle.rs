@@ -126,7 +126,7 @@ pub fn disable(project: &ProjectLayout, realm: &Realm, name: &str, yes: bool) ->
     print!("{}", super::activation_steps(&destination));
     println!();
     println!(
-        "undo this move with `lyracore packages enable {}`.",
+        "re-enable the source with `lyracore packages enable {}`. This does not restore data deleted by Package Teardown.",
         name.as_str()
     );
     Ok(())
