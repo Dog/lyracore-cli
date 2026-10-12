@@ -331,9 +331,11 @@ pub fn run(
     }
     databases(&shards)?;
     check::prepare(project, runner, prompt, options.client_data.as_deref())?;
-    let has_rust = inventory(project)?.iter().any(|package| {
-        package.state == super::PackageState::Enabled && package.dir.join("src/mod.rs").is_file()
-    });
+    // Disabled Rust may still be deployed if it was disabled without a running local stack.
+    // Its removal needs a publish even when the target has no pending teardown record.
+    let has_rust = inventory(project)?
+        .iter()
+        .any(|package| package.dir.join("src/mod.rs").is_file());
 
     // ---- preflight: the artifacts, once, before any target is touched ----
     let root = project.packages_dir();
@@ -2172,15 +2174,11 @@ mod tests {
     }
 
     #[test]
-    fn disabled_rust_without_pending_teardown_does_not_publish() {
+    fn disabled_rust_without_pending_teardown_publishes_its_removal() {
         let checkout = Checkout::new();
         checkout.with_rust();
-        std::fs::create_dir_all(checkout.project.packages_disabled_dir()).unwrap();
-        std::fs::rename(
-            checkout.project.packages_dir().join("greeter"),
-            checkout.project.packages_disabled_dir().join("greeter"),
-        )
-        .unwrap();
+        super::super::lifecycle::tests::disable_without_stack(&checkout.project, "greeter")
+            .unwrap();
         let stack = FakeStack::new();
         run(
             &checkout.project,
@@ -2189,14 +2187,18 @@ mod tests {
             &checkout.options_without_client_data(&["one"]),
         )
         .unwrap();
+        let calls = stack.rendered();
         assert!(
-            !stack
-                .rendered()
+            calls
                 .iter()
-                .any(|call| call.contains("spacetime publish")
-                    || call.contains("debug_repair_after_publish")),
-            "{:?}",
-            stack.rendered()
+                .any(|call| call.starts_with("spacetime publish")),
+            "{calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.contains("debug_repair_after_publish")),
+            "{calls:?}"
         );
     }
 

@@ -644,7 +644,8 @@ Local generated files can change during a check.
 If the Package Inventory contains Rust, or a target records pending Package Teardown, `apply`
 publishes this checkout's Module. It keeps the normal preflight and Loot Roll upgrade checks and
 repairs schedules on each published Shard before continuing. Rust Packages cause a publish on
-every run; artifact provenance does not track compiled Rust. Disable a Rust Package through
+every run, including disabled Packages whose code may still be deployed after an offline disable;
+artifact provenance does not track compiled Rust. Disable a Rust Package through
 `packages disable` before removing it so its tables and Characters receive Package Teardown.
 
 Each Shard completes its publish and schedule repair, when needed, before applying artifacts.
@@ -1174,7 +1175,8 @@ allows that replacement and first retains the old revision on a local
 `lyracore-backup/<full-commit-sha>` branch. The printed branch can be inspected or switched to
 for recovery. This option still refuses tracked edits and incoming paths that overlap untracked
 or ignored files/directories. Unrelated untracked files are preserved. A failed update leaves
-any recovery branch in place; a repeated attempt reuses its name.
+any recovery branch in place. If the recovery branch already exists, the update refuses to
+overwrite it; rename that branch with Git before retrying.
 
 A checkout already at `origin/main` reports that it is current. When the CLI pin changes, the
 new revision installs on the next `lyracore` invocation.

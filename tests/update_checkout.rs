@@ -107,6 +107,28 @@ fn a_failed_recovery_ref_prevents_the_mirror_reset() {
 }
 
 #[test]
+fn mirror_reset_never_moves_an_existing_recovery_branch() {
+    for active_backup in [false, true] {
+        let checkout = Checkout::new();
+        let work = checkout.path("work");
+        let head = checkout.commit("work", "local.txt", "recover me");
+        let backup = format!("lyracore-backup/{head}");
+        git(&work, &["checkout", "-b", &backup]);
+        let saved = if active_backup {
+            head.clone()
+        } else {
+            let advanced = checkout.commit("work", "recovered.txt", "more work");
+            git(&work, &["checkout", "main"]);
+            advanced
+        };
+        let output = checkout.update(&["--reset-mirror"]);
+        assert!(!output.status.success(), "must refuse an existing backup");
+        assert_eq!(git(&work, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(&work, &["rev-parse", &backup]), saved);
+    }
+}
+
+#[test]
 fn update_keeps_clean_local_commits() {
     let checkout = Checkout::new();
     let head = checkout.commit("work", "local.txt", "keep me");
@@ -203,5 +225,34 @@ fn update_refuses_untracked_and_ignored_files_in_the_way() {
                 "local version"
             );
         }
+    }
+}
+
+#[test]
+fn nested_workspace_updates_protect_files_outside_the_workspace() {
+    for flags in [vec![], vec!["--reset-mirror"]] {
+        let checkout = Checkout::new();
+        let work = checkout.path("work");
+        std::fs::create_dir(checkout.path("origin/core")).unwrap();
+        let head = checkout.commit("origin", "core/Cargo.toml", "[workspace]\n");
+        git(&work, &["fetch", "origin"]);
+        git(&work, &["reset", "--hard", &head]);
+        std::fs::write(work.join("ignored.txt"), "local work").unwrap();
+        checkout.commit("origin", "ignored.txt", "incoming file");
+        let output = Command::new(env!("CARGO_BIN_EXE_lyracore"))
+            .arg("update")
+            .args(flags)
+            .current_dir(work.join("core"))
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "must protect the entire repository"
+        );
+        assert_eq!(git(&work, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            std::fs::read_to_string(work.join("ignored.txt")).unwrap(),
+            "local work"
+        );
     }
 }

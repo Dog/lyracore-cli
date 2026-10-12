@@ -41,18 +41,23 @@ pub fn run(project: &ProjectLayout, runner: &dyn ProcessRunner, reset_mirror: bo
         }
     }
     // Git reset protects ordinary untracked files, but can overwrite ignored ones. Check both,
-    // including untracked directories that an incoming tracked file would replace.
+    // including untracked directories that an incoming tracked file would replace. Reset affects
+    // the whole repository, even when the selected workspace is nested below its root.
     let untracked = runner.run_and_wait(
         &git()
             .arg("ls-files")
             .arg("--others")
             .arg("--directory")
-            .arg("-z"),
+            .arg("--full-name")
+            .arg("-z")
+            .arg("--")
+            .arg(":/"),
     )?;
     let incoming = runner.run_and_wait(
         &git()
             .arg("ls-tree")
             .arg("-r")
+            .arg("--full-tree")
             .arg("--name-only")
             .arg("-z")
             .arg(upstream),
@@ -73,13 +78,9 @@ pub fn run(project: &ProjectLayout, runner: &dyn ProcessRunner, reset_mirror: bo
     }
     if reset_mirror {
         let backup = format!("lyracore-backup/{head}");
-        // The name identifies its content, so repeating an interrupted reset preserves the same ref.
-        runner.run_and_wait(
-            &git()
-                .arg("update-ref")
-                .arg(format!("refs/heads/{backup}"))
-                .arg(head),
-        )?;
+        // Never overwrite a recovery branch: users may have advanced it or checked it out.
+        // Refusing an existing name also prevents reset from moving the backup itself.
+        runner.run_and_wait(&git().arg("branch").arg("--").arg(&backup).arg(head))?;
         println!("saved the previous revision on branch {backup}");
     }
     let old_pin = read_pin(project);

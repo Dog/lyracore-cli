@@ -23,3 +23,8 @@ and delete the duplicated rules. Keep credentials out of arguments and reports t
 
 The Loot Roll upgrade guard in `publish` also remains necessary while supported destinations
 can carry the old schema. Remove it only when the supported upgrade floor excludes that state.
+
+Skipping publication solely because all Rust Packages are disabled is also unsafe: an offline
+disable creates no remote teardown record, so a target may still run that Package's code.
+Keep the inventory-wide publication trigger until per-target compiled-module identity can prove
+that disabled Rust has already been removed.
