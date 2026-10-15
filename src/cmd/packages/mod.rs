@@ -764,7 +764,11 @@ impl Drop for StagedPackage {
 /// must fail the whole operation rather than merge two Packages or overwrite one. Callers report
 /// `EEXIST` in their own words, because "the destination appeared while I was copying" and "the
 /// other inventory already holds this name" are different things to fix.
-fn rename_no_replace(from: &Path, to: &Path) -> std::result::Result<(), rustix::io::Errno> {
+#[cfg(not(target_os = "freebsd"))]
+fn rename_no_replace(
+    from: &Path,
+    to: &Path,
+) -> std::result::Result<(), rustix::io::Errno> {
     rustix::fs::renameat_with(
         rustix::fs::CWD,
         from,
@@ -772,6 +776,40 @@ fn rename_no_replace(from: &Path, to: &Path) -> std::result::Result<(), rustix::
         to,
         rustix::fs::RenameFlags::NOREPLACE,
     )
+}
+
+#[cfg(target_os = "freebsd")]
+fn rename_no_replace(
+    from: &Path,
+    to: &Path,
+) -> std::result::Result<(), rustix::io::Errno> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let from = CString::new(from.as_os_str().as_bytes())
+        .map_err(|_| rustix::io::Errno::INVAL)?;
+    let to = CString::new(to.as_os_str().as_bytes())
+        .map_err(|_| rustix::io::Errno::INVAL)?;
+
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::AT_RENAME_NOREPLACE as u32,
+        )
+    };
+
+    if result == 0 {
+        Ok(())
+    } else {
+        let error = std::io::Error::last_os_error();
+        Err(
+            rustix::io::Errno::from_io_error(&error)
+                .unwrap_or(rustix::io::Errno::IO),
+        )
+    }
 }
 
 /// Copy a validated Package tree file by file into a fresh staging directory.
