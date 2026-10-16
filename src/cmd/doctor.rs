@@ -16,10 +16,25 @@ use std::process::{Command, Stdio};
 /// Keep this in step with that pin (LyraCore's `module/Cargo.toml` + `gateway/Cargo.toml`).
 pub const REQUIRED_SPACETIME: Version = Version(2, 7, 1);
 
-/// The Bun version the Datascript toolchain is pinned to exactly. Bun itself interprets
-/// `engines.bun` as a compatibility range, but Package authors need the verified runtime as well
-/// as the locked dependency graph. Keep this in step with the checkout's Datascript toolchain.
-pub const REQUIRED_BUN: Version = Version(1, 3, 7);
+/// Read the exact Bun runtime verified by this checkout. Do not interpret ranges: Package
+/// builds and their identities must agree on one runtime without consulting the installed Bun.
+pub fn required_bun(project: &ProjectLayout) -> Result<Version> {
+    let path = project.datascripts_dir().join("package.json");
+    let refuse = |detail: String| {
+        crate::Error::PrerequisiteMissing(format!(
+            "cannot read the Bun pin from {}: {detail}. Set `engines.bun` to an exact x.y.z version",
+            path.display()
+        ))
+    };
+    let text = std::fs::read_to_string(&path).map_err(|error| refuse(error.to_string()))?;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| refuse(error.to_string()))?;
+    manifest
+        .pointer("/engines/bun")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_bare_version)
+        .ok_or_else(|| refuse("missing or invalid `engines.bun`".to_string()))
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Check {
@@ -104,7 +119,7 @@ pub fn run(layout: &Result<ProjectLayout>) -> Vec<Check> {
             "Cargo ships with Rust — see https://rustup.rs/",
         ),
         check_spacetime(),
-        check_bun(),
+        check_bun(layout.as_ref().ok()),
         check_wasm_target(),
         check_wasm_opt(),
         check_ports(),
@@ -215,41 +230,51 @@ fn check_spacetime() -> Check {
 /// broken one. `packages build` compares the same banner against the same pin below, through
 /// [`bun_version_check`], but treats a bad answer as a hard failure: it is the one command that
 /// actually runs Bun.
-fn check_bun() -> Check {
+fn check_bun(project: Option<&ProjectLayout>) -> Check {
+    let Some(project) = project else {
+        return Check::warn(
+            "Bun",
+            "no checkout available to read the Datascript Bun pin",
+        );
+    };
+    let required = match required_bun(project) {
+        Ok(required) => required,
+        Err(error) => return Check::warn("Bun", error.to_string()),
+    };
     let text = version_output("bun", &["--version"]);
-    check_bun_banner(text.as_deref())
+    check_bun_banner(text.as_deref(), required)
 }
 
-fn check_bun_banner(text: Option<&str>) -> Check {
-    let install = format!("`{}`", bun_install_hint());
-    match bun_version_check(text) {
+fn check_bun_banner(text: Option<&str>, required: Version) -> Check {
+    let install = format!("`{}`", bun_install_hint(required));
+    match bun_version_check(text, required) {
         BunVersionCheck::Pinned(found) => Check::pass("Bun", format!("{found} (pinned)")),
         BunVersionCheck::Missing => Check::warn(
             "Bun",
             format!(
                 "`bun` not found — needed only by `lyracore packages build` (Datascript typegen \
-                 and typecheck); install the pinned {REQUIRED_BUN} with {install}"
+                 and typecheck); install the pinned {required} with {install}"
             ),
         ),
         BunVersionCheck::Mismatched(found) => Check::warn(
             "Bun",
             format!(
                 "found {found}, but this checkout's Datascript toolchain is pinned to \
-                 {REQUIRED_BUN} — install that exact version with {install}. `lyracore packages \
+                 {required} — install that exact version with {install}. `lyracore packages \
                  build` is not verified with a different Bun runtime"
             ),
         ),
         BunVersionCheck::Unparsable => Check::warn(
             "Bun",
             format!(
-                "could not read a version from `bun --version`; expected exactly {REQUIRED_BUN}. \
+                "could not read a version from `bun --version`; expected exactly {required}. \
                  Reinstall it with {install}"
             ),
         ),
     }
 }
 
-/// How a `bun --version` banner (or its absence) compares against [`REQUIRED_BUN`].
+/// How a `bun --version` banner (or its absence) compares against the checkout pin.
 ///
 /// The one place that comparison is expressed: `doctor` turns it into a warning, `packages build`
 /// turns the same answer into a hard failure. Neither call site re-derives the verdict itself.
@@ -261,20 +286,20 @@ pub enum BunVersionCheck {
     Unparsable,
 }
 
-pub fn bun_version_check(text: Option<&str>) -> BunVersionCheck {
+pub fn bun_version_check(text: Option<&str>, required: Version) -> BunVersionCheck {
     let Some(text) = text else {
         return BunVersionCheck::Missing;
     };
     match parse_bare_version(text) {
-        Some(found) if found == REQUIRED_BUN => BunVersionCheck::Pinned(found),
+        Some(found) if found == required => BunVersionCheck::Pinned(found),
         Some(found) => BunVersionCheck::Mismatched(found),
         None => BunVersionCheck::Unparsable,
     }
 }
 
 /// The exact-version reinstall command every Bun check points an author at.
-pub fn bun_install_hint() -> String {
-    format!("curl -fsSL https://bun.sh/install | bash -s \"bun-v{REQUIRED_BUN}\"")
+pub fn bun_install_hint(required: Version) -> String {
+    format!("curl -fsSL https://bun.sh/install | bash -s \"bun-v{required}\"")
 }
 
 /// Bun's banner is exactly `x.y.z`; unlike the chatty SpacetimeDB banner, trailing components or
@@ -518,13 +543,66 @@ mod tests {
     // ---- the Bun check ----
 
     #[test]
+    fn the_checkout_selects_the_bun_version_and_install_hint() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        let project = ProjectLayout::from_root(tmp.path()).unwrap();
+        std::fs::create_dir_all(project.datascripts_dir()).unwrap();
+        for version in ["1.3.7", "1.4.3"] {
+            std::fs::write(
+                project.datascripts_dir().join("package.json"),
+                serde_json::json!({"engines": {"bun": version}}).to_string(),
+            )
+            .unwrap();
+            let required = required_bun(&project).unwrap();
+            assert_eq!(required.to_string(), version);
+            assert!(matches!(
+                check_bun_banner(Some(version), required),
+                Check::Pass { .. }
+            ));
+            let Check::Warn { guidance, .. } = check_bun_banner(None, required) else {
+                panic!("missing Bun must warn");
+            };
+            assert!(guidance.contains(&format!("bun-v{version}")), "{guidance}");
+        }
+    }
+
+    #[test]
+    fn a_missing_or_invalid_bun_pin_is_actionable_and_never_blocks_doctor() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        let project = ProjectLayout::from_root(tmp.path()).unwrap();
+        assert!(required_bun(&project).is_err());
+        assert!(!check_bun(Some(&project)).is_blocking());
+        std::fs::create_dir_all(project.datascripts_dir()).unwrap();
+        for manifest in [
+            "{",
+            "{}",
+            r#"{"engines":{"bun":143}}"#,
+            r#"{"engines":{"bun":"^1.4.3"}}"#,
+            r#"{"engines":{"bun":">=1.4.3"}}"#,
+            r#"{"engines":{"bun":"1.4"}}"#,
+            r#"{"engines":{"bun":"1.4.3-beta"}}"#,
+        ] {
+            std::fs::write(project.datascripts_dir().join("package.json"), manifest).unwrap();
+            let error = required_bun(&project).unwrap_err().to_string();
+            assert!(
+                error.contains("package.json") && error.contains("engines.bun"),
+                "{error}"
+            );
+            assert!(!check_bun(Some(&project)).is_blocking());
+        }
+    }
+
+    #[test]
     fn the_required_bun_version_is_an_exact_pin() {
         assert!(matches!(
-            check_bun_banner(Some("1.3.7\n")),
+            check_bun_banner(Some("1.3.7\n"), Version(1, 3, 7)),
             Check::Pass { .. }
         ));
         for version in ["1.3.6", "1.4.0", "2.0.0"] {
-            let Check::Warn { guidance, .. } = check_bun_banner(Some(version)) else {
+            let Check::Warn { guidance, .. } = check_bun_banner(Some(version), Version(1, 3, 7))
+            else {
                 panic!("{version} must not satisfy the Bun pin");
             };
             assert!(guidance.contains("bun-v1.3.7"), "{guidance}");
@@ -538,7 +616,7 @@ mod tests {
         for malformed in ["bun 1.3.7", "1.3.7.99", "1.3", "1.3.seven"] {
             assert_eq!(parse_bare_version(malformed), None, "{malformed}");
             assert!(matches!(
-                check_bun_banner(Some(malformed)),
+                check_bun_banner(Some(malformed), Version(1, 3, 7)),
                 Check::Warn { .. }
             ));
         }
@@ -548,12 +626,14 @@ mod tests {
     fn a_missing_or_old_bun_is_a_warning_never_a_launch_blocker() {
         // Bun is author-side only. An Operator applying a prebuilt Package Delta needs none, so
         // `doctor` must not exit nonzero over it on their machine.
-        assert!(!check_bun().is_blocking(), "Bun may never block a launch");
+        for banner in [None, Some("1.3.7")] {
+            assert!(!check_bun_banner(banner, Version(1, 4, 3)).is_blocking());
+        }
     }
 
     #[test]
     fn missing_bun_has_the_exact_version_install_command() {
-        let Check::Warn { guidance, .. } = check_bun_banner(None) else {
+        let Check::Warn { guidance, .. } = check_bun_banner(None, Version(1, 3, 7)) else {
             panic!("missing Bun must warn");
         };
         assert!(guidance.contains("bun-v1.3.7"), "{guidance}");

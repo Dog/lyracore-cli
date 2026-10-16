@@ -856,6 +856,11 @@ mod tests {
             for name in ["tsconfig.json", "package.json", "bun.lock"] {
                 std::fs::write(project.datascripts_dir().join(name), "{}").unwrap();
             }
+            std::fs::write(
+                project.datascripts_dir().join("package.json"),
+                r#"{"engines":{"bun":"1.3.7"}}"#,
+            )
+            .unwrap();
             std::fs::create_dir_all(project.datascript_types_dir()).unwrap();
             std::fs::write(project.base_snapshot_file(), "{}").unwrap();
             Self { tmp, project }

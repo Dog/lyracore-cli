@@ -34,10 +34,9 @@
 //! Nothing here reads a timestamp or an absolute path, so the sidecar for one input tree is
 //! byte-identical wherever it is built.
 //!
-//! The recorded Bun version is the checkout's PIN (`doctor::REQUIRED_BUN`), not a shelled `bun
-//! --version` — `packages build` already hard-gates on that exact pin before it runs anything, so
-//! asking Bun to confirm its own version a second time would only be a slower way to read the same
-//! constant.
+//! The recorded Bun version comes from `engines.bun` in `datascripts/package.json`.
+//! `packages build` verifies the installed runtime against that pin before running any scripts.
+//! Reading the pin from disk lets `packages check` verify identities without Bun installed.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -341,7 +340,7 @@ pub fn compute(
             generated_hash,
             snapshot_hash,
             lib_hash,
-            bun_version: doctor::REQUIRED_BUN.to_string(),
+            bun_version: doctor::required_bun(project)?.to_string(),
             tsconfig_hash,
             package_json_hash,
             bun_lock_hash,
@@ -509,7 +508,7 @@ pub fn compute_script(project: &ProjectLayout, artifact_path: &Path) -> Result<S
     Ok(ScriptIdentity {
         source_hash: hash_script_sources(&sources)?,
         toolchain_hash: hash_dir_files(&project.runtime_scripts_dir())?,
-        bun_version: doctor::REQUIRED_BUN.to_string(),
+        bun_version: doctor::required_bun(project)?.to_string(),
         bun_lock_hash: hash_file(&project.datascripts_dir().join("bun.lock"))?,
         artifact_hash: hash_file(artifact_path)?,
     })
@@ -641,7 +640,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(project.datascripts_dir().join("tsconfig.json"), "{}\n").unwrap();
-        std::fs::write(project.datascripts_dir().join("package.json"), "{}\n").unwrap();
+        std::fs::write(
+            project.datascripts_dir().join("package.json"),
+            r#"{"engines":{"bun":"1.3.7"}}"#,
+        )
+        .unwrap();
         std::fs::write(project.datascripts_dir().join("bun.lock"), "{}\n").unwrap();
         project
     }
@@ -807,6 +810,27 @@ mod tests {
     }
 
     #[test]
+    fn both_artifact_kinds_record_the_checkouts_bun_pin() {
+        let tmp = TempDir::new().unwrap();
+        let project = checkout(&tmp);
+        let dir = package_dir_of(&project);
+        std::fs::create_dir_all(&dir).unwrap();
+        let artifact = dir.join("fixture.script.json");
+        std::fs::write(&artifact, "{}").unwrap();
+        for version in ["1.3.7", "1.4.3"] {
+            std::fs::write(
+                project.datascripts_dir().join("package.json"),
+                serde_json::json!({"engines": {"bun": version}}).to_string(),
+            )
+            .unwrap();
+            let (delta, _) = compute(&project, &dir, HASH_A).unwrap();
+            let script = compute_script(&project, &artifact).unwrap();
+            assert_eq!(delta.bun_version, version);
+            assert_eq!(script.bun_version, version);
+        }
+    }
+
+    #[test]
     fn a_changed_tsconfig_package_json_or_lockfile_is_named() {
         let tmp = TempDir::new().unwrap();
         let project = checkout(&tmp);
@@ -826,7 +850,7 @@ mod tests {
         std::fs::write(project.datascripts_dir().join("tsconfig.json"), "{}\n").unwrap();
         std::fs::write(
             project.datascripts_dir().join("package.json"),
-            "{\"name\":\"datascripts\"}\n",
+            r#"{"name":"datascripts","engines":{"bun":"1.3.7"}}"#,
         )
         .unwrap();
         let (current, available) = compute(&project, &package_dir_of(&project), HASH_A).unwrap();
@@ -835,7 +859,11 @@ mod tests {
             vec![Input::PackageJson]
         );
 
-        std::fs::write(project.datascripts_dir().join("package.json"), "{}\n").unwrap();
+        std::fs::write(
+            project.datascripts_dir().join("package.json"),
+            r#"{"engines":{"bun":"1.3.7"}}"#,
+        )
+        .unwrap();
         std::fs::write(
             project.datascripts_dir().join("bun.lock"),
             "{\"lockfileVersion\":1}\n",
