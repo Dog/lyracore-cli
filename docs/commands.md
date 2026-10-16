@@ -440,8 +440,9 @@ existing artifacts are still validated and artifacts whose last Runtime Script s
 are retired. Runtime-script-only builds need Bun and the locked dependencies, but no schema
 typings or Datascript typecheck. With Datascripts, the steps are:
 
-0. `bun --version` must match the checkout's pin. A hard failure, not a warning: the next two steps
-   run `bun install` and the locked `tsc` for real, against whatever Bun is on `PATH`.
+0. `bun --version` must match the exact `engines.bun` pin in `datascripts/package.json`.
+   A mismatch is a hard failure: the next steps run `bun install` and the locked `tsc`
+   against the Bun on `PATH`.
 1. `spacetime generate --lang typescript` extracts the schema **through the module wasm** and writes
    it to `datascripts/generated/`. Offline: it builds the module and reads it, and touches no
    database.
@@ -499,7 +500,7 @@ declares a table, re-run `packages build`, and its row type is in `datascripts/g
 
 ```text
 datascripts/
-  package.json     the pins: Bun 1.3.7, spacetimedb 2.7.1, typescript 7.0.2
+  package.json     the checkout’s Bun, SpacetimeDB, and TypeScript pins
   bun.lock         committed — a fresh checkout resolves exactly these dependencies
   tsconfig.json    strict, noEmit
   src/             the Datascripts. `src/reference.ts` is the maintained reference Datascript
@@ -526,8 +527,10 @@ artifacts. **An Operator applying a prebuilt Package needs no Bun and no Node.**
 `dev up`, `preflight`, `publish` or `client sync` invokes a JavaScript toolchain. That is why
 `doctor` reports a missing or different Bun version as a warning and never as a launch blocker.
 
-Install the pinned version with
-`curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.7"`.
+The exact version comes from `engines.bun` in the checkout's `datascripts/package.json`.
+`doctor` and `packages build` print an install command for that version. Build Identities record
+the same pin, so changing it makes existing source-built artifacts stale until rebuilt.
+`packages check` reads the pin from disk and does not need Bun installed.
 
 Datascripts are **trusted author-time code**, run from this checkout by the person who wrote them.
 They are not sandboxed and are not described as sandboxed. `packages build` above is what turns one

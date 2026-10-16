@@ -1216,6 +1216,11 @@ mod tests {
         let project = ProjectLayout::from_root(tmp.path()).unwrap();
         std::fs::create_dir_all(project.runtime_scripts_dir()).unwrap();
         std::fs::write(project.script_builder_file(), "// the builder\n").unwrap();
+        std::fs::write(
+            project.datascripts_dir().join("package.json"),
+            r#"{"engines":{"bun":"1.3.7"}}"#,
+        )
+        .unwrap();
         std::fs::write(project.datascripts_dir().join("bun.lock"), "{}\n").unwrap();
         project
     }

@@ -281,7 +281,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(project.datascripts_dir().join("tsconfig.json"), "{}\n").unwrap();
-        std::fs::write(project.datascripts_dir().join("package.json"), "{}\n").unwrap();
+        std::fs::write(
+            project.datascripts_dir().join("package.json"),
+            r#"{"engines":{"bun":"1.3.7"}}"#,
+        )
+        .unwrap();
         std::fs::write(project.datascripts_dir().join("bun.lock"), "{}\n").unwrap();
 
         let generated = project

@@ -116,28 +116,29 @@ pub fn typecheck_command(project: &ProjectLayout) -> CommandSpec {
 /// Verify Bun before anything is installed or typechecked with it. Missing, mismatched, and
 /// unparsable banners all take the exact wording `doctor`'s Bun check reports as a warning — this
 /// caller's own wording is only "hard failure" versus "warning", not a second explanation.
-fn verify_bun(runner: &dyn ProcessRunner) -> Result<()> {
+fn verify_bun(project: &ProjectLayout, runner: &dyn ProcessRunner) -> Result<()> {
+    let required = doctor::required_bun(project)?;
     let banner = runner
         .run_capturing_stderr(&CommandSpec::new("bun").arg("--version"))
         .ok();
-    let install = doctor::bun_install_hint();
-    match doctor::bun_version_check(banner.as_deref()) {
+    let install = doctor::bun_install_hint(required);
+    match doctor::bun_version_check(banner.as_deref(), required) {
         BunVersionCheck::Pinned(_) => Ok(()),
         BunVersionCheck::Missing => Err(Error::PrerequisiteMissing(format!(
             "`bun` not found. `packages build` needs the pinned {} to install and typecheck \
              Datascripts; install it with `{install}`",
-            doctor::REQUIRED_BUN
+            required
         ))),
         BunVersionCheck::Mismatched(found) => Err(Error::PrerequisiteMissing(format!(
             "bun reports {found}, but this checkout's Datascript toolchain is pinned to {}. \
              `packages build` is not verified against a different Bun runtime; install the pinned \
              version with `{install}`",
-            doctor::REQUIRED_BUN
+            required
         ))),
         BunVersionCheck::Unparsable => Err(Error::PrerequisiteMissing(format!(
             "could not read a version from `bun --version`; expected exactly {}. Reinstall it \
              with `{install}`",
-            doctor::REQUIRED_BUN
+            required
         ))),
     }
 }
@@ -386,7 +387,7 @@ fn prepare_toolchain(
         )));
     }
 
-    verify_bun(runner)?;
+    verify_bun(project, runner)?;
 
     if !datascript_packages.is_empty() {
         println!(
@@ -519,7 +520,11 @@ mod tests {
         let root = tmp.path().join("checkout");
         std::fs::create_dir_all(root.join("datascripts/src")).unwrap();
         std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
-        std::fs::write(root.join("datascripts/package.json"), "{}\n").unwrap();
+        std::fs::write(
+            root.join("datascripts/package.json"),
+            r#"{"engines":{"bun":"1.3.7"}}"#,
+        )
+        .unwrap();
         std::fs::write(root.join("datascripts/bun.lock"), "{}\n").unwrap();
         std::fs::write(root.join("datascripts/tsconfig.json"), "{}\n").unwrap();
         ProjectLayout::from_root(&root).unwrap()
@@ -1093,6 +1098,71 @@ mod tests {
             calls[4].contains("fire_nova/data/.generated/fire_nova.script.json"),
             "{calls:?}"
         );
+    }
+
+    #[test]
+    fn a_build_accepts_the_checkouts_bun_pin() {
+        let tmp = TempDir::new().unwrap();
+        let project = checkout(&tmp);
+        with_runtime_script(&project, "fire_nova");
+        std::fs::write(
+            project.datascripts_dir().join("package.json"),
+            r#"{"engines":{"bun":"1.4.3"}}"#,
+        )
+        .unwrap();
+        let stack = FakeStack::new()
+            .with_stdout("bun --version", "1.4.3\n")
+            .with_stdout("--print-events", "on_login\n");
+
+        run(&project, &stack.runner()).unwrap();
+        super::super::check::run(&project, &stack.runner()).unwrap();
+    }
+
+    #[test]
+    fn an_invalid_bun_pin_fails_before_running_any_tools() {
+        let tmp = TempDir::new().unwrap();
+        let project = checkout(&tmp);
+        with_runtime_script(&project, "fire_nova");
+        std::fs::write(
+            project.datascripts_dir().join("package.json"),
+            r#"{"engines":{"bun":"^1.4.3"}}"#,
+        )
+        .unwrap();
+        let stack = FakeStack::new();
+        let error = run(&project, &stack.runner()).unwrap_err();
+        assert!(error.to_string().contains("engines.bun"), "{error}");
+        assert!(stack.rendered().is_empty());
+    }
+
+    #[test]
+    fn a_rebuild_refreshes_stale_script_toolchain_and_lockfile_identities() {
+        let tmp = TempDir::new().unwrap();
+        let project = checkout(&tmp);
+        with_runtime_script(&project, "fire_nova");
+        let stack = FakeStack::new().with_stdout("--print-events", "on_login\n");
+        run(&project, &stack.runner()).unwrap();
+        std::fs::write(
+            project.datascripts_dir().join("package.json"),
+            r#"{"engines":{"bun":"1.4.3"}}"#,
+        )
+        .unwrap();
+        std::fs::write(project.script_builder_file(), "// changed builder\n").unwrap();
+        std::fs::write(
+            project.datascripts_dir().join("bun.lock"),
+            "changed lockfile",
+        )
+        .unwrap();
+
+        let error = super::super::check::run(&project, &stack.runner()).unwrap_err();
+        assert!(error.to_string().contains("toolchain"), "{error}");
+        assert!(error.to_string().contains("bun.lock"), "{error}");
+        assert!(error.to_string().contains("Bun version"), "{error}");
+
+        let stack = FakeStack::new()
+            .with_stdout("bun --version", "1.4.3")
+            .with_stdout("--print-events", "on_login\n");
+        run(&project, &stack.runner()).unwrap();
+        super::super::check::run(&project, &stack.runner()).unwrap();
     }
 
     #[test]
