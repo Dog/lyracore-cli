@@ -758,17 +758,9 @@ impl Drop for StagedPackage {
     }
 }
 
-/// Move `from` onto `to`, never replacing whatever is already at `to`.
-///
-/// The guarantee both the staged install and the enable/disable moves need: an occupied destination
-/// must fail the whole operation rather than merge two Packages or overwrite one. Callers report
-/// `EEXIST` in their own words, because "the destination appeared while I was copying" and "the
-/// other inventory already holds this name" are different things to fix.
+/// Atomically move `from` to `to`; an occupied destination returns `EEXIST` without changing either.
 #[cfg(not(target_os = "freebsd"))]
-fn rename_no_replace(
-    from: &Path,
-    to: &Path,
-) -> std::result::Result<(), rustix::io::Errno> {
+fn rename_no_replace(from: &Path, to: &Path) -> std::result::Result<(), rustix::io::Errno> {
     rustix::fs::renameat_with(
         rustix::fs::CWD,
         from,
@@ -778,18 +770,14 @@ fn rename_no_replace(
     )
 }
 
+/// Atomically move `from` to `to`; an occupied destination returns `EEXIST` without changing either.
 #[cfg(target_os = "freebsd")]
-fn rename_no_replace(
-    from: &Path,
-    to: &Path,
-) -> std::result::Result<(), rustix::io::Errno> {
+fn rename_no_replace(from: &Path, to: &Path) -> std::result::Result<(), rustix::io::Errno> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    let from = CString::new(from.as_os_str().as_bytes())
-        .map_err(|_| rustix::io::Errno::INVAL)?;
-    let to = CString::new(to.as_os_str().as_bytes())
-        .map_err(|_| rustix::io::Errno::INVAL)?;
+    let from = CString::new(from.as_os_str().as_bytes()).map_err(|_| rustix::io::Errno::INVAL)?;
+    let to = CString::new(to.as_os_str().as_bytes()).map_err(|_| rustix::io::Errno::INVAL)?;
 
     let result = unsafe {
         libc::renameat2(
@@ -805,10 +793,7 @@ fn rename_no_replace(
         Ok(())
     } else {
         let error = std::io::Error::last_os_error();
-        Err(
-            rustix::io::Errno::from_io_error(&error)
-                .unwrap_or(rustix::io::Errno::IO),
-        )
+        Err(rustix::io::Errno::from_io_error(&error).unwrap_or(rustix::io::Errno::IO))
     }
 }
 
