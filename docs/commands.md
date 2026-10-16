@@ -500,7 +500,7 @@ declares a table, re-run `packages build`, and its row type is in `datascripts/g
 
 ```text
 datascripts/
-  package.json     the pins: Bun 1.3.7, spacetimedb 2.7.1, typescript 7.0.2
+  package.json     the checkout’s Bun, SpacetimeDB, and TypeScript pins
   bun.lock         committed — a fresh checkout resolves exactly these dependencies
   tsconfig.json    strict, noEmit
   src/             the Datascripts. `src/reference.ts` is the maintained reference Datascript
