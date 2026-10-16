@@ -56,6 +56,9 @@ The developer CLI does not install Rust or SpacetimeDB or manage backups.
 
 ## Development
 
+FreeBSD builds require 15.1 or newer. Package moves use its atomic `renameat2` operation to
+refuse existing destinations without overwriting them.
+
 ```bash
 cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
